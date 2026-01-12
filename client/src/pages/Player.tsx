@@ -1,23 +1,17 @@
-import { useState, useEffect, useRef } from 'react';
-import { Play, Pause, Volume2, VolumeX, Maximize, X, AlertCircle, Loader } from 'lucide-react';
-import { Button } from '@/components/ui/button';
+'use client';
 
-interface Channel {
-  title: string;
-  url: string;
-  type: 'web' | 'acestream';
-}
+import { useEffect, useState } from 'react';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import VideoJsPlayer from '@/components/VideoJsPlayer';
+import { getMatch, getChannels, type Match, type Channel } from '@/lib/api';
 
 export default function Player() {
-  const [matchTitle, setMatchTitle] = useState('');
+  const [match, setMatch] = useState<Match | null>(null);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [currentChannelIndex, setCurrentChannelIndex] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [isMuted, setIsMuted] = useState(false);
-  const [isFullscreen, setIsFullscreen] = useState(false);
-  const iframeRef = useRef<HTMLIFrameElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
+  const [error, setError] = useState<string | null>(null);
 
   // Инициализация Telegram Web App
   useEffect(() => {
@@ -29,233 +23,185 @@ export default function Player() {
     }
   }, []);
 
-  // Загрузка параметров из URL
+  // Загрузка данных матча
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const link = params.get('link');
-    const title = params.get('title');
-    const channelsParam = params.get('channels');
-
-    if (!link) {
-      setError('Ссылка на трансляцию не найдена');
-      setIsLoading(false);
-      return;
-    }
-
-    setMatchTitle(title ? decodeURIComponent(title) : 'Трансляция');
-
-    // Парсим каналы если есть
-    if (channelsParam) {
+    const loadMatch = async () => {
       try {
-        const parsedChannels = JSON.parse(decodeURIComponent(channelsParam));
-        setChannels(parsedChannels);
-      } catch (e) {
-        console.error('Ошибка парсинга каналов:', e);
-        setChannels([{ title: 'Основной', url: decodeURIComponent(link), type: 'web' }]);
-      }
-    } else {
-      setChannels([{ title: 'Основной', url: decodeURIComponent(link), type: 'web' }]);
-    }
+        setIsLoading(true);
+        setError(null);
 
-    setIsLoading(false);
+        // Получаем matchId из URL параметров
+        const params = new URLSearchParams(window.location.search);
+        const matchIdParam = params.get('match_id');
+        const matchId = matchIdParam ? parseInt(matchIdParam, 10) : 0;
+
+        // Загружаем матч
+        const matchResponse = await getMatch(matchId);
+        if (!matchResponse.success || !matchResponse.data) {
+          setError(matchResponse.error || 'Не удалось загрузить матч');
+          setIsLoading(false);
+          return;
+        }
+
+        setMatch(matchResponse.data);
+
+        // Загружаем каналы
+        const channelsResponse = await getChannels(matchId);
+        if (!channelsResponse.success || !channelsResponse.data) {
+          setError(channelsResponse.error || 'Не удалось загрузить каналы');
+          setIsLoading(false);
+          return;
+        }
+
+        setChannels(channelsResponse.data);
+        setCurrentChannelIndex(0);
+        setIsLoading(false);
+      } catch (err) {
+        setError(`Ошибка при загрузке данных: ${err}`);
+        setIsLoading(false);
+      }
+    };
+
+    loadMatch();
   }, []);
 
   const currentChannel = channels[currentChannelIndex];
 
-  const handleSwitchChannel = (index: number) => {
-    setCurrentChannelIndex(index);
-    setError('');
+  const handlePreviousChannel = () => {
+    setCurrentChannelIndex((prev) => (prev > 0 ? prev - 1 : channels.length - 1));
   };
 
-  const handleToggleFullscreen = async () => {
-    if (!containerRef.current) return;
-
-    try {
-      if (!document.fullscreenElement) {
-        await containerRef.current.requestFullscreen();
-        setIsFullscreen(true);
-      } else {
-        await document.exitFullscreen();
-        setIsFullscreen(false);
-      }
-    } catch (err) {
-      console.error('Ошибка полного экрана:', err);
-    }
+  const handleNextChannel = () => {
+    setCurrentChannelIndex((prev) => (prev < channels.length - 1 ? prev + 1 : 0));
   };
 
-  const handleCopyLink = () => {
-    if (currentChannel) {
-      navigator.clipboard.writeText(currentChannel.url).then(() => {
-        if (typeof window !== 'undefined' && 'Telegram' in window) {
-          const tg = (window as any).Telegram.WebApp;
-          tg.showPopup({
-            title: 'Скопировано',
-            message: 'Ссылка скопирована в буфер обмена',
-            buttons: [{ type: 'ok', text: 'OK' }]
-          });
-        }
-      });
-    }
-  };
-
-  const handleCloseApp = () => {
-    if (typeof window !== 'undefined' && 'Telegram' in window) {
-      const tg = (window as any).Telegram.WebApp;
-      tg.close();
+  const handlePlayerError = (errorMsg: string) => {
+    console.error('Player error:', errorMsg);
+    // Автоматически переходим на следующий канал при ошибке
+    if (channels.length > 1) {
+      setTimeout(() => {
+        handleNextChannel();
+      }, 2000);
     }
   };
 
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex items-center justify-center">
-        <div className="text-center">
-          <Loader className="w-12 h-12 text-blue-500 animate-spin mx-auto mb-4" />
-          <p className="text-white text-lg">Загрузка плеера...</p>
+      <div className="w-full h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-16 h-16 border-4 border-blue-500/30 border-t-blue-500 rounded-full animate-spin" />
+          <p className="text-white text-lg font-medium">Загрузка трансляции...</p>
         </div>
       </div>
     );
   }
 
-  if (error) {
+  if (error || !match || channels.length === 0) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex items-center justify-center p-4">
-        <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-6 max-w-md w-full">
-          <div className="flex items-start gap-3">
-            <AlertCircle className="w-6 h-6 text-red-500 flex-shrink-0 mt-0.5" />
-            <div>
-              <h3 className="text-red-500 font-semibold mb-2">Ошибка</h3>
-              <p className="text-white/80 text-sm">{error}</p>
-              <Button onClick={handleCloseApp} variant="outline" className="mt-4 w-full">
-                Закрыть
-              </Button>
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  if (currentChannel?.type === 'acestream') {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex items-center justify-center p-4">
-        <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-6 max-w-md w-full">
-          <div className="text-center">
-            <div className="text-4xl mb-4">🌀</div>
-            <h3 className="text-blue-400 font-semibold mb-2 text-lg">Ace Stream трансляция</h3>
-            <p className="text-white/80 text-sm mb-4">
-              Для просмотра установите приложение Ace Stream Media
-            </p>
-            <div className="bg-slate-800/50 rounded p-3 mb-4">
-              <code className="text-xs text-blue-300 break-all font-mono">
-                {currentChannel.url.replace('acestream://', '')}
-              </code>
-            </div>
-            <div className="flex gap-2">
-              <Button onClick={handleCopyLink} className="flex-1" variant="default">
-                📋 Копировать
-              </Button>
-              <Button onClick={handleCloseApp} variant="outline" className="flex-1">
-                Закрыть
-              </Button>
-            </div>
-          </div>
+      <div className="w-full h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex items-center justify-center p-4">
+        <div className="flex flex-col items-center gap-4 text-center">
+          <div className="text-red-500 text-6xl">⚠️</div>
+          <p className="text-white text-lg font-medium">Ошибка загрузки</p>
+          <p className="text-gray-400 text-sm">{error || 'Матч или каналы не найдены'}</p>
+          <Button
+            onClick={() => window.history.back()}
+            className="mt-4 bg-blue-600 hover:bg-blue-700"
+          >
+            Вернуться назад
+          </Button>
         </div>
       </div>
     );
   }
 
   return (
-    <div
-      ref={containerRef}
-      className={`${isFullscreen ? 'fixed inset-0 z-50' : 'min-h-screen'} bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex flex-col`}
-    >
-      {/* Header */}
-      {!isFullscreen && (
-        <div className="bg-slate-900/80 backdrop-blur border-b border-slate-700/50 px-4 py-3 flex items-center justify-between">
-          <div className="flex-1">
-            <h1 className="text-white font-semibold text-sm truncate">📺 FutLive</h1>
-            <p className="text-white/60 text-xs truncate">{matchTitle}</p>
-          </div>
-          <Button
-            onClick={handleCloseApp}
-            variant="ghost"
-            size="sm"
-            className="text-white/60 hover:text-white hover:bg-slate-700/50"
-          >
-            <X className="w-5 h-5" />
-          </Button>
-        </div>
-      )}
-
-      {/* Channel Tabs */}
-      {channels.length > 1 && !isFullscreen && (
-        <div className="bg-slate-800/50 border-b border-slate-700/50 px-4 py-2 overflow-x-auto">
-          <div className="flex gap-2">
-            {channels.map((channel, index) => (
-              <button
-                key={index}
-                onClick={() => handleSwitchChannel(index)}
-                className={`px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap transition-all ${
-                  index === currentChannelIndex
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-slate-700/50 text-white/70 hover:bg-slate-600/50'
-                }`}
-              >
-                {channel.title}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Player Container */}
-      <div className="flex-1 bg-black relative overflow-hidden">
-        {currentChannel?.url.startsWith('http') ? (
-          <iframe
-            ref={iframeRef}
-            src={currentChannel.url}
-            className="w-full h-full border-none"
-            allowFullScreen
-            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
-            referrerPolicy="no-referrer"
-            sandbox="allow-forms allow-modals allow-orientation-lock allow-pointer-lock allow-popups allow-popups-to-escape-sandbox allow-presentation allow-same-origin allow-scripts allow-top-navigation allow-top-navigation-by-user-activation"
-          />
-        ) : (
-          <div className="w-full h-full flex items-center justify-center">
-            <AlertCircle className="w-12 h-12 text-red-500" />
-          </div>
-        )}
+    <div className="w-full h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex flex-col">
+      {/* Заголовок */}
+      <div className="bg-black/40 backdrop-blur-sm border-b border-white/10 px-4 py-3">
+        <h1 className="text-white font-bold text-lg truncate">{match.title}</h1>
+        <p className="text-gray-400 text-xs mt-1">
+          Канал {currentChannelIndex + 1} из {channels.length}
+        </p>
       </div>
 
-      {/* Controls */}
-      {!isFullscreen && (
-        <div className="bg-slate-900/80 backdrop-blur border-t border-slate-700/50 px-4 py-3 flex gap-2">
-          <Button
-            onClick={() => setIsMuted(!isMuted)}
-            variant="outline"
-            size="sm"
-            className="text-white/70 hover:text-white hover:bg-slate-700/50"
-          >
-            {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
-          </Button>
-          <Button
-            onClick={handleCopyLink}
-            variant="outline"
-            size="sm"
-            className="text-white/70 hover:text-white hover:bg-slate-700/50"
-          >
-            📋 Копировать
-          </Button>
-          <Button
-            onClick={handleToggleFullscreen}
-            variant="outline"
-            size="sm"
-            className="text-white/70 hover:text-white hover:bg-slate-700/50"
-          >
-            <Maximize className="w-4 h-4" />
-          </Button>
+      {/* Плеер */}
+      <div className="flex-1 flex items-center justify-center bg-black p-2 sm:p-4">
+        <div className="w-full h-full max-w-6xl">
+          {currentChannel && (
+            <VideoJsPlayer
+              url={currentChannel.url}
+              title={currentChannel.title}
+              onError={handlePlayerError}
+            />
+          )}
         </div>
-      )}
+      </div>
+
+      {/* Информация о канале и управление */}
+      <div className="bg-black/40 backdrop-blur-sm border-t border-white/10 p-4 space-y-3">
+        {/* Название текущего канала */}
+        <div className="flex items-center justify-between">
+          <div className="flex-1">
+            <p className="text-white font-semibold text-sm">{currentChannel?.title}</p>
+            <p className="text-gray-400 text-xs mt-1">
+              {currentChannel?.url.startsWith('acestream://')
+                ? '🎬 Ace Stream'
+                : currentChannel?.url.includes('m3u8')
+                ? '📺 HLS Поток'
+                : '🌐 Веб-плеер'}
+            </p>
+          </div>
+        </div>
+
+        {/* Управление каналами */}
+        {channels.length > 1 && (
+          <div className="flex gap-2 items-center justify-between">
+            <Button
+              onClick={handlePreviousChannel}
+              variant="outline"
+              size="sm"
+              className="flex-1 bg-white/10 hover:bg-white/20 border-white/20 text-white"
+            >
+              <ChevronLeft className="w-4 h-4 mr-1" />
+              Предыдущий
+            </Button>
+
+            {/* Список каналов (горизонтальный скролл) */}
+            <div className="flex gap-2 overflow-x-auto flex-1 pb-2">
+              {channels.map((channel, index) => (
+                <button
+                  key={index}
+                  onClick={() => setCurrentChannelIndex(index)}
+                  className={`px-3 py-1 rounded text-xs font-medium whitespace-nowrap transition-all ${
+                    index === currentChannelIndex
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-white/10 text-gray-300 hover:bg-white/20'
+                  }`}
+                >
+                  {index + 1}
+                </button>
+              ))}
+            </div>
+
+            <Button
+              onClick={handleNextChannel}
+              variant="outline"
+              size="sm"
+              className="flex-1 bg-white/10 hover:bg-white/20 border-white/20 text-white"
+            >
+              Следующий
+              <ChevronRight className="w-4 h-4 ml-1" />
+            </Button>
+          </div>
+        )}
+
+        {/* Информация о потоке */}
+        <div className="bg-white/5 rounded p-2 text-xs text-gray-400 border border-white/10">
+          <p className="truncate">
+            <span className="text-gray-500">URL:</span> {currentChannel?.url.substring(0, 50)}...
+          </p>
+        </div>
+      </div>
     </div>
   );
 }
