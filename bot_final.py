@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 # Инициализация бота
 API_TOKEN = "8111388773:AAFiCTukv5d8XSavnsL7ybMs8kRL42uFWB4"
 WEB_APP_URL = "https://futlive-player-v2.manus.space/player"  # URL вашего Web App
+API_BASE_URL = "https://futlive-player-v2.manus.space/api"  # API для получения данных
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
