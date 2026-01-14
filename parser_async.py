@@ -6,7 +6,7 @@
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from parser import GoooolParser
+import os
 
 # Глобальный парсер
 _parser = None
@@ -16,7 +16,9 @@ def get_parser():
     """Получить или создать экземпляр парсера"""
     global _parser
     if _parser is None:
+        from parser import GoooolParser
         _parser = GoooolParser()
+        print("[PARSER_ASYNC] Используем реальный парсер")
     return _parser
 
 async def get_matches():
