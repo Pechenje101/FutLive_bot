@@ -31,6 +31,13 @@ run_service() {
 echo ""
 echo "🔍 Проверка зависимостей..."
 
+# Проверка Redis
+if ! command -v redis-server &> /dev/null; then
+    echo "⚠️ Redis не установлен, используется локальный кэш"
+else
+    echo "✅ Redis найден"
+fi
+
 # Проверка Python
 if ! command -v python3 &> /dev/null; then
     echo "❌ Python3 не установлен"
@@ -66,6 +73,19 @@ echo ""
 echo "🔄 Запуск компонентов..."
 echo "========================"
 
+# Запуск Redis
+if command -v redis-server &> /dev/null; then
+    echo "📍 Запуск Redis сервера..."
+    redis-server --daemonize yes --logfile "$LOG_DIR/redis.log"
+    sleep 1
+    if redis-cli ping > /dev/null 2>&1; then
+        echo "✅ Redis запущен"
+    else
+        echo "⚠️ Redis не доступен, используется локальный кэш"
+    fi
+fi
+sleep 1
+
 # Запуск API сервера
 run_service "api-server" "cd $PROJECT_DIR && python3 api_server.py"
 sleep 2
@@ -83,9 +103,11 @@ echo "✅ Все компоненты запущены!"
 echo "=========================="
 echo ""
 echo "📊 Статус сервисов:"
+echo "  🔴 Redis: http://localhost:6379"
 echo "  🤖 Telegram Bot: Запущен"
 echo "  🌐 Web App: http://localhost:3000"
 echo "  📡 API Server: http://localhost:5000"
+echo "  🔔 Сервис уведомлений: Активен"
 echo ""
 echo "📝 Логи находятся в: $LOG_DIR"
 echo ""
@@ -94,6 +116,7 @@ echo "  - Telegram Bot: @FutLiveBot (найти в Telegram)"
 echo "  - Web App: https://futlive-player-v2.manus.space"
 echo "  - API Docs: http://localhost:5000/api/health"
 echo ""
+echo "⏹️  Для остановки Redis: redis-cli shutdown"
 echo "⏹️  Для остановки всех сервисов выполните: ./stop_all.sh"
 echo ""
 
