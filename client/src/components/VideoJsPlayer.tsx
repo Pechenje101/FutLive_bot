@@ -1,3 +1,5 @@
+'use client';
+
 import { useEffect, useRef, useState } from 'react';
 import videojs from 'video.js';
 import 'video.js/dist/video-js.css';
@@ -181,7 +183,7 @@ export default function VideoJsPlayer({ url, title, onError }: VideoJsPlayerProp
         playerRef.current = null;
       }
     };
-  }, [url, onError, retryCount, proxyIndex]);
+  }, [url, onError, retryCount, proxyIndex, isLoading]);
 
   return (
     <div className="w-full h-full bg-black rounded-lg overflow-hidden">
@@ -198,34 +200,20 @@ export default function VideoJsPlayer({ url, title, onError }: VideoJsPlayerProp
             <div className="flex flex-col items-center gap-3">
               <div className="w-12 h-12 border-4 border-gray-600 border-t-white rounded-full animate-spin" />
               <p className="text-white text-sm">{title || 'Загрузка...'}</p>
-              {retryCount > 0 && (
-                <p className="text-gray-400 text-xs">
-                  Попытка {retryCount}/{RETRY_CONFIG.maxAttempts}
-                </p>
-              )}
-              {url.startsWith('acestream://') && proxyIndex > 0 && (
-                <p className="text-gray-400 text-xs">
-                  Прокси {proxyIndex + 1}/{ACE_STREAM_PROXIES.length}
-                </p>
-              )}
             </div>
           </div>
         )}
 
         {/* Сообщение об ошибке */}
-        {error && (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/80">
+        {error && !isLoading && (
+          <div className="absolute inset-0 flex items-center justify-center bg-black/70">
             <div className="flex flex-col items-center gap-3 text-center px-4">
               <div className="text-red-500 text-4xl">⚠️</div>
-              <p className="text-white text-sm font-medium">{error}</p>
-              <p className="text-gray-400 text-xs">
-                {retryCount < RETRY_CONFIG.maxAttempts
-                  ? `Автоматическая повторная попытка...`
-                  : 'Попробуйте выбрать другой канал'}
-              </p>
-              {url.startsWith('acestream://') && proxyIndex < ACE_STREAM_PROXIES.length - 1 && (
-                <p className="text-gray-400 text-xs">
-                  Пробуем другой прокси...
+              <p className="text-white text-sm font-medium">Ошибка воспроизведения</p>
+              <p className="text-gray-400 text-xs">{error}</p>
+              {retryCount > 0 && (
+                <p className="text-yellow-500 text-xs">
+                  Попытка {retryCount}/{RETRY_CONFIG.maxAttempts}
                 </p>
               )}
             </div>

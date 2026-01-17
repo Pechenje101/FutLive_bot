@@ -109,18 +109,53 @@ def api_matches():
             'count': 0
         }), 500
 
-@app.route('/api/match/<int:match_id>/links', methods=['GET'])
-def api_match_links(match_id):
-    """Получить каналы для конкретного матча"""
+@app.route('/api/match/<int:match_id>', methods=['GET'])
+def api_get_match(match_id):
+    """Получить матч по ID (для Frontend)"""
     try:
-        logger.info(f"🔗 Запрос: GET /api/match/{match_id}/links")
+        logger.info(f"📺 Запрос: GET /api/match/{match_id}")
         matches = get_cached_matches()
         
         if match_id >= len(matches):
             return jsonify({
                 'success': False,
                 'error': 'Match not found',
-                'data': {}
+                'data': None
+            }), 404
+        
+        match = matches[match_id]
+        result = {
+            'id': match_id,
+            'title': match.get('title', 'Unknown'),
+            'url': match.get('url', ''),
+        }
+        
+        logger.info(f"✅ Возвращаем матч {match_id}")
+        return jsonify({
+            'success': True,
+            'data': result
+        })
+    except Exception as e:
+        logger.error(f"❌ Ошибка в /api/match/{match_id}: {e}")
+        capture_exception(e, {'context': f'api_get_match_{match_id}'})
+        return jsonify({
+            'success': False,
+            'error': 'Failed to fetch match',
+            'data': None
+        }), 500
+
+@app.route('/api/channels/<int:match_id>', methods=['GET'])
+def api_get_channels(match_id):
+    """Получить каналы для конкретного матча (для Frontend)"""
+    try:
+        logger.info(f"🔗 Запрос: GET /api/channels/{match_id}")
+        matches = get_cached_matches()
+        
+        if match_id >= len(matches):
+            return jsonify({
+                'success': False,
+                'error': 'Match not found',
+                'data': []
             }), 404
         
         match = matches[match_id]
@@ -135,19 +170,28 @@ def api_match_links(match_id):
         finally:
             loop.close()
         
-        logger.info(f"✅ Найдено {len(links)} каналов для матча {match_id}")
+        # Преобразуем в формат для Frontend
+        channels = []
+        for idx, link in enumerate(links):
+            channels.append({
+                'id': idx,
+                'title': link.get('title', f'Канал {idx + 1}'),
+                'url': link.get('url', ''),
+                'type': 'acestream' if link.get('url', '').startswith('acestream://') else 'web'
+            })
+        
+        logger.info(f"✅ Найдено {len(channels)} каналов для матча {match_id}")
         return jsonify({
             'success': True,
-            'data': links,
-            'match_title': match.get('title', 'Unknown')
+            'data': channels
         })
     except Exception as e:
-        logger.error(f"❌ Ошибка в /api/match/{match_id}/links: {e}")
-        capture_exception(e, {'context': f'api_match_links_{match_id}'})
+        logger.error(f"❌ Ошибка в /api/channels/{match_id}: {e}")
+        capture_exception(e, {'context': f'api_get_channels_{match_id}'})
         return jsonify({
             'success': False,
-            'error': 'Failed to fetch links',
-            'data': {}
+            'error': 'Failed to fetch channels',
+            'data': []
         }), 500
 
 @app.errorhandler(404)
