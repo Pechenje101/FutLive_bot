@@ -1,0 +1,25 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Установка системных зависимостей
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Копирование зависимостей
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Копирование кода
+COPY . .
+
+# Создание директории для логов
+RUN mkdir -p logs
+
+# Скрипт запуска
+COPY start_backend.sh .
+RUN chmod +x start_backend.sh
+
+CMD ["./start_backend.sh"]

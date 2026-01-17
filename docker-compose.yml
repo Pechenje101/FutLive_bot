@@ -1,0 +1,75 @@
+version: '3.8'
+
+services:
+  # Redis для кэширования
+  redis:
+    image: redis:7-alpine
+    restart: always
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - futlive-network
+
+  # Backend (API + Bot)
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    restart: always
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - FLASK_ENV=production
+      - SENTRY_DSN=${SENTRY_DSN:-}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - API_URL=${API_URL:-http://localhost:5000}
+    volumes:
+      - ./logs:/app/logs
+    depends_on:
+      - redis
+    networks:
+      - futlive-network
+
+  # Frontend (Web App)
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    restart: always
+    networks:
+      - futlive-network
+
+  # Nginx Proxy с SSL
+  nginx:
+    image: nginx:alpine
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf
+      - ./certbot/conf:/etc/letsencrypt:ro
+      - ./certbot/www:/var/www/certbot:ro
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - futlive-network
+
+  # Certbot для автоматического SSL
+  certbot:
+    image: certbot/certbot
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    entrypoint: /bin/sh -c 'trap exit TERM; while :; do certbot renew --quiet; sleep 12h & wait $${!}; done;'
+    networks:
+      - futlive-network
+
+networks:
+  futlive-network:
+    driver: bridge
+
+volumes:
+  redis_data:

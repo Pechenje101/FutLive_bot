@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 API сервер для Web App плеера
 Предоставляет данные о матчах и каналах через REST API
@@ -10,15 +9,28 @@ import logging
 import asyncio
 import sys
 import time
+import os
 sys.path.insert(0, '/home/ubuntu/futlive-player-v2')
 
 from parser_async import get_matches, get_match_links
+from sentry_config import init_sentry, capture_exception
+from prometheus_flask_exporter import PrometheusMetrics
 
 app = Flask(__name__)
 CORS(app)
 
+# Инициализация Sentry
+init_sentry()
+
+# Инициализация Prometheus метрик
+metrics = PrometheusMetrics(app)
+metrics.info('futlive_app_info', 'FutLive Player API', version='1.0.0')
+
 # Настройка логирования
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # Кэш данных
@@ -52,10 +64,18 @@ def get_cached_matches():
         logger.info(f"✅ Загружено {len(matches)} матчей")
         return matches
     except Exception as e:
-        logger.error(f"❌ Ошибка при получении матчей: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"❌ Ошибка при загрузке матчей: {e}")
+        capture_exception(e, {'context': 'get_cached_matches'})
         return []
+
+@app.route('/api/health', methods=['GET'])
+def health():
+    """Проверка здоровья API"""
+    return jsonify({
+        'status': 'OK',
+        'success': True,
+        'version': '1.0.0'
+    })
 
 @app.route('/api/matches', methods=['GET'])
 def api_matches():
@@ -81,71 +101,32 @@ def api_matches():
         })
     except Exception as e:
         logger.error(f"❌ Ошибка в /api/matches: {e}")
-        import traceback
-        traceback.print_exc()
+        capture_exception(e, {'context': 'api_matches'})
         return jsonify({
             'success': False,
-            'error': str(e)
+            'error': 'Failed to fetch matches',
+            'data': [],
+            'count': 0
         }), 500
 
-@app.route('/api/match/<int:match_id>', methods=['GET'])
-def api_match(match_id):
-    """Получить информацию о конкретном матче"""
+@app.route('/api/match/<int:match_id>/links', methods=['GET'])
+def api_match_links(match_id):
+    """Получить каналы для конкретного матча"""
     try:
-        logger.info(f"📺 Запрос: GET /api/match/{match_id}")
+        logger.info(f"🔗 Запрос: GET /api/match/{match_id}/links")
         matches = get_cached_matches()
         
         if match_id >= len(matches):
-            logger.warning(f"⚠️ Матч {match_id} не найден")
             return jsonify({
                 'success': False,
-                'error': 'Match not found'
-            }), 404
-        
-        match = matches[match_id]
-        
-        return jsonify({
-            'success': True,
-            'data': {
-                'id': match_id,
-                'title': match.get('title', 'Unknown'),
-                'url': match.get('url', ''),
-            }
-        })
-    except Exception as e:
-        logger.error(f"Ошибка в /api/match/{match_id}: {e}")
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
-@app.route('/api/channels/<int:match_id>', methods=['GET'])
-def api_channels(match_id):
-    """Получить каналы для матча"""
-    try:
-        logger.info(f"📺 Запрос: GET /api/channels/{match_id}")
-        matches = get_cached_matches()
-        
-        if match_id >= len(matches):
-            logger.warning(f"⚠️ Матч {match_id} не найден")
-            return jsonify({
-                'success': False,
-                'error': 'Match not found'
+                'error': 'Match not found',
+                'data': {}
             }), 404
         
         match = matches[match_id]
         match_url = match.get('url', '')
         
-        if not match_url:
-            logger.warning(f"⚠️ URL матча {match_id} не найден")
-            return jsonify({
-                'success': False,
-                'error': 'Match URL not found'
-            }), 400
-        
-        logger.info(f"🔄 Загрузка каналов для матча: {match.get('title')}")
-        
-        # Получаем ссылки на каналы асинхронно
+        # Получаем каналы для матча
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
@@ -154,130 +135,39 @@ def api_channels(match_id):
         finally:
             loop.close()
         
-        # Преобразуем в формат для API
-        channels = []
-        for idx, (channel_name, channel_url) in enumerate(links.items()):
-            channels.append({
-                'id': idx,
-                'title': channel_name,
-                'url': channel_url,
-                'type': 'acestream' if channel_url.startswith('acestream://') else 'web'
-            })
-        
-        logger.info(f"✅ Найдено {len(channels)} каналов")
+        logger.info(f"✅ Найдено {len(links)} каналов для матча {match_id}")
         return jsonify({
             'success': True,
-            'data': channels,
-            'count': len(channels)
+            'data': links,
+            'match_title': match.get('title', 'Unknown')
         })
     except Exception as e:
-        logger.error(f"❌ Ошибка в /api/channels/{match_id}: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"❌ Ошибка в /api/match/{match_id}/links: {e}")
+        capture_exception(e, {'context': f'api_match_links_{match_id}'})
         return jsonify({
             'success': False,
-            'error': str(e)
+            'error': 'Failed to fetch links',
+            'data': {}
         }), 500
-
-@app.route('/api/channel/<int:match_id>/<int:channel_id>', methods=['GET'])
-def api_channel(match_id, channel_id):
-    """Получить конкретный канал"""
-    try:
-        logger.info(f"📺 Запрос: GET /api/channel/{match_id}/{channel_id}")
-        matches = get_cached_matches()
-        
-        if match_id >= len(matches):
-            logger.warning(f"⚠️ Матч {match_id} не найден")
-            return jsonify({
-                'success': False,
-                'error': 'Match not found'
-            }), 404
-        
-        match = matches[match_id]
-        match_url = match.get('url', '')
-        
-        # Получаем ссылки на каналы асинхронно
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        try:
-            links = loop.run_until_complete(get_match_links(match_url))
-        finally:
-            loop.close()
-        
-        channels = list(links.items())
-        
-        if channel_id >= len(channels):
-            logger.warning(f"⚠️ Канал {channel_id} не найден")
-            return jsonify({
-                'success': False,
-                'error': 'Channel not found'
-            }), 404
-        
-        channel_name, channel_url = channels[channel_id]
-        
-        return jsonify({
-            'success': True,
-            'data': {
-                'id': channel_id,
-                'title': channel_name,
-                'url': channel_url,
-                'type': 'acestream' if channel_url.startswith('acestream://') else 'web'
-            }
-        })
-    except Exception as e:
-        logger.error(f"❌ Ошибка в /api/channel/{match_id}/{channel_id}: {e}")
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
-@app.route('/api/health', methods=['GET'])
-def api_health():
-    """Проверка здоровья API"""
-    return jsonify({
-        'success': True,
-        'status': 'OK',
-        'version': '1.0.0'
-    })
-
-@app.route('/api/clear-cache', methods=['POST'])
-def api_clear_cache():
-    """Очистить кэш матчей"""
-    global matches_cache, cache_timestamp
-    matches_cache = {}
-    cache_timestamp = 0
-    
-    logger.info("🧹 Кэш очищен")
-    return jsonify({
-        'success': True,
-        'message': 'Cache cleared'
-    })
 
 @app.errorhandler(404)
 def not_found(error):
     """Обработка 404 ошибок"""
-    logger.warning(f"⚠️ 404 Error: {error}")
     return jsonify({
         'success': False,
-        'error': 'Endpoint not found'
+        'error': 'Not found'
     }), 404
 
 @app.errorhandler(500)
 def internal_error(error):
     """Обработка 500 ошибок"""
     logger.error(f"❌ Internal server error: {error}")
+    capture_exception(error)
     return jsonify({
         'success': False,
         'error': 'Internal server error'
     }), 500
 
 if __name__ == '__main__':
-    logger.info("=" * 50)
-    logger.info("🚀 FutLive API Server запущен")
-    logger.info("=" * 50)
-    logger.info("📡 Слушаю на http://0.0.0.0:5000")
-    logger.info("📝 Логирование включено")
-    logger.info("=" * 50)
-    
-    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+    logger.info("🚀 Запуск API сервера...")
+    app.run(host='0.0.0.0', port=5000, debug=False)

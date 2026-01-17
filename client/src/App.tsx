@@ -6,6 +6,10 @@ import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import Home from "./pages/Home";
 import Player from "./pages/Player";
+import { initSentry } from "./lib/sentry";
+
+// Инициализация Sentry для мониторинга ошибок
+initSentry();
 
 
 function Router() {
