@@ -1,0 +1,17 @@
+{
+  "build": {
+    "builder": "dockerfile"
+  },
+  "deploy": {
+    "startCommand": "docker-compose up -d",
+    "restartPolicyMaxRetries": 10,
+    "restartPolicyWindowMs": 60000
+  },
+  "environment": {
+    "TELEGRAM_BOT_TOKEN": "",
+    "SENTRY_DSN": "",
+    "FLASK_ENV": "production",
+    "LOG_LEVEL": "INFO",
+    "REDIS_URL": "redis://redis:6379/0"
+  }
+}
