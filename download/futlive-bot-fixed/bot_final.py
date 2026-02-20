@@ -1,308 +1,409 @@
 """
 FutLive Bot - Telegram бот для просмотра матчей и трансляций
-Использует livetv.sx для получения информации о матчах и трансляциях
+С Web App плеером и поддержкой прямого открытия Ace Player
 """
 
 import asyncio
 import logging
 import signal
 import sys
+import re
+import urllib.parse
+import json
+from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from match_finder import MatchFinder, SPORTS
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.state import State, StatesGroup
 import os
+
+from match_finder import MatchFinder, SPORTS
 
 # Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
 # Инициализация бота
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-if not TELEGRAM_BOT_TOKEN:
-    raise ValueError("❌ TELEGRAM_BOT_TOKEN не установлен!")
+TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+if not TOKEN:
+    raise ValueError("TELEGRAM_BOT_TOKEN не установлен!")
 
-bot = Bot(token=TELEGRAM_BOT_TOKEN)
-dp = Dispatcher()
+# URL для Web App (GitHub Pages)
+WEB_APP_URL = "https://pechenje101.github.io/FutLive_bot/"
 
-# Инициализация парсера матчей
-match_finder = MatchFinder()
+bot = Bot(token=TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
+finder = MatchFinder()
 
-# Класс для хранения состояния (вместо global переменных)
-class BotState:
-    def __init__(self):
-        self.matches_cache = {}
-        self.is_running = True
+# Кэш матчей
+cache = {"matches": [], "by_sport": {}, "ready": False, "last_update": 0}
+
+
+class SubscribeStates(StatesGroup):
+    waiting_for_team = State()
+    waiting_for_search = State()
+
+
+def normalize_team_name(name: str) -> str:
+    return re.sub(r'[^\w\s]', '', name.lower().strip())
+
+
+def find_team_matches(team_name: str, matches: list) -> list:
+    team_normalized = normalize_team_name(team_name)
+    result = []
+    for m in matches:
+        title_normalized = normalize_team_name(m['title'])
+        if team_normalized in title_normalized:
+            result.append(m)
+    return result
+
+
+def get_web_app_url(match: dict, auto_play: bool = False) -> str:
+    """Генерирует URL для Web App плеера"""
+    params = {
+        'title': match['title'],
+        'time': match['time'],
+        'status': match['status'],
+        'league': match.get('league', ''),
+        'url': match['url'],
+    }
+    if match.get('acestreams'):
+        params['acestreams'] = urllib.parse.quote(json.dumps(match['acestreams']))
+    elif match.get('acestream'):
+        params['acestream'] = match['acestream']
     
-    def set_cache(self, matches_list):
-        """Обновляет кэш матчей"""
-        self.matches_cache = {}
-        for match in matches_list:
-            sport = match['sport']
-            if sport not in self.matches_cache:
-                self.matches_cache[sport] = []
-            self.matches_cache[sport].append(match)
+    if auto_play:
+        params['play'] = '1'
     
-    def get_matches(self, sport):
-        """Получает матчи из кэша по спорту"""
-        return self.matches_cache.get(sport, [])
-    
-    def clear_cache(self):
-        """Очищает кэш"""
-        self.matches_cache = {}
+    return WEB_APP_URL + '?' + urllib.parse.urlencode(params)
 
-# Глобальный экземпляр состояния
-bot_state = BotState()
+
+async def refresh_cache():
+    """Обновляет кэш матчей"""
+    global cache
+    while True:
+        try:
+            matches = await finder.find_live_matches(force_refresh=True)
+            seen = set()
+            unique_matches = []
+            for m in matches:
+                if m["id"] not in seen:
+                    seen.add(m["id"])
+                    unique_matches.append(m)
+            
+            by_sport = {}
+            for m in unique_matches:
+                by_sport.setdefault(m['sport'], []).append(m)
+            
+            cache = {
+                "matches": unique_matches,
+                "by_sport": by_sport,
+                "ready": True,
+                "last_update": datetime.now().timestamp()
+            }
+            logger.info(f"📦 Кэш: {len(unique_matches)} матчей")
+        except Exception as e:
+            logger.error(f"Ошибка обновления: {e}")
+        await asyncio.sleep(90)
+
+
+# Language markers for Ace Stream sources
+LANGUAGE_MARKERS = [
+    {'flag': '🇷🇺', 'name': 'Русский'},
+    {'flag': '🇬🇧', 'name': 'English'},
+    {'flag': '🇩🇪', 'name': 'Deutsch'},
+    {'flag': '🇪🇸', 'name': 'Español'},
+    {'flag': '🇮🇹', 'name': 'Italiano'},
+    {'flag': '🇫🇷', 'name': 'Français'},
+    {'flag': '🇵🇹', 'name': 'Português'},
+    {'flag': '🌍', 'name': 'Other'},
+]
+
+
+def format_acestream_sources(acestreams: list) -> str:
+    """Форматирует список Ace Stream ссылок с маркировкой языка"""
+    if not acestreams:
+        return ""
+    
+    result = f"\n\n<b>📺 Ace Stream ({len(acestreams)} источн.):</b>\n"
+    
+    for i, link in enumerate(acestreams[:5]):
+        lang_info = LANGUAGE_MARKERS[i] if i < len(LANGUAGE_MARKERS) else LANGUAGE_MARKERS[-1]
+        result += f"{i+1}. {lang_info['flag']} {lang_info['name']}\n   <code>{link}</code>\n"
+    
+    if len(acestreams) > 5:
+        result += f"\n<i>... и еще {len(acestreams) - 5} источников</i>"
+    
+    return result
+
+
+def get_main_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔴 LIVE сейчас", callback_data="live")],
+        [InlineKeyboardButton(text="📋 Все матчи", callback_data="all")],
+        [InlineKeyboardButton(text="🔍 Поиск матча", callback_data="search")],
+        [InlineKeyboardButton(text="🏆 По спорту", callback_data="sports")],
+        [InlineKeyboardButton(text="ℹ️ Помощь", callback_data="help")],
+    ])
 
 
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
-    """Обработчик команды /start"""
-    logger.info(f"👤 Новый пользователь: {message.from_user.id}")
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🏆 Выбрать спорт", callback_data="select_sport")],
-        [InlineKeyboardButton(text="ℹ️ О боте", callback_data="about")],
-    ])
-    
-    await message.answer(
-        "👋 Добро пожаловать в FutLive Bot!\n\n"
-        "Здесь вы можете:\n"
-        "⚽ Смотреть список матчей по видам спорта\n"
-        "📺 Найти трансляции на livetv.sx\n"
-        "🏆 Выбрать интересующий вид спорта\n\n"
-        "Выберите действие:",
-        reply_markup=keyboard
-    )
+    text = "🏆 <b>FutLive Bot</b>\n\nСмотрите трансляции в один клик!\n\n👇 <b>Выберите:</b>"
+    await message.answer(text, reply_markup=get_main_menu(), parse_mode="HTML")
 
 
-@dp.callback_query(F.data == "select_sport")
-async def select_sport(callback: types.CallbackQuery):
-    """Выбор спорта с показом количества матчей"""
-    logger.info(f"🏆 Пользователь {callback.from_user.id} выбирает спорт")
-    
-    await callback.answer("⏳ Загружаю виды спорта...", show_alert=False)
-    
-    try:
-        # Получаем все матчи
-        all_matches = await match_finder.find_live_matches()
-        
-        if not all_matches:
-            await callback.message.edit_text(
-                "❌ Матчи не найдены. Попробуйте позже.",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")],
-                ])
-            )
-            return
-        
-        # Сохраняем матчи в кэш через класс состояния
-        bot_state.set_cache(all_matches)
-        
-        # Группируем матчи по спорту и считаем количество
-        sports_count = {}
-        for match in all_matches:
-            sport = match['sport']
-            if sport not in sports_count:
-                sports_count[sport] = 0
-            sports_count[sport] += 1
-        
-        # Формируем кнопки для каждого спорта
-        keyboard_buttons = []
-        for sport in sorted(sports_count.keys()):
-            sport_info = SPORTS.get(sport, {})
-            emoji = sport_info.get('emoji', '⚽')
-            name = sport_info.get('name', sport)
-            count = sports_count[sport]
-            
-            button_text = f"{emoji} {name} +{count}"
-            keyboard_buttons.append([
-                InlineKeyboardButton(text=button_text, callback_data=f"sport_{sport}")
-            ])
-        
-        keyboard_buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")])
-        
-        text = "🏆 **Выберите вид спорта:**\n\n"
-        text += "Нажмите на спорт, чтобы увидеть все матчи"
-        
-        await callback.message.edit_text(
-            text,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_buttons),
-            parse_mode="Markdown"
-        )
-    
-    except Exception as e:
-        logger.error(f"❌ Ошибка при загрузке спортов: {e}")
-        import traceback
-        traceback.print_exc()
-        await callback.message.edit_text(
-            "❌ Ошибка при загрузке спортов. Попробуйте позже.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")],
-            ])
-        )
+@dp.callback_query(F.data == "menu")
+async def go_menu(cb: types.CallbackQuery):
+    await cb.message.edit_text("🏆 <b>FutLive Bot</b>\n\n👇 <b>Выберите:</b>", reply_markup=get_main_menu(), parse_mode="HTML")
+    await cb.answer()
 
 
-@dp.callback_query(F.data.startswith("sport_"))
-async def show_sport_matches(callback: types.CallbackQuery):
-    """Показать все матчи по выбранному спорту"""
-    sport = callback.data.replace("sport_", "")
-    logger.info(f"🏆 Пользователь {callback.from_user.id} выбрал спорт: {sport}")
-    
-    await callback.answer("⏳ Загружаю матчи...", show_alert=False)
-    
-    try:
-        # Получаем матчи из кэша
-        matches = bot_state.get_matches(sport)
-        
-        if not matches:
-            await callback.message.edit_text(
-                f"❌ Матчи по спорту не найдены.",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_sport")],
-                ])
-            )
-            return
-        
-        # Формируем сообщение
-        sport_info = SPORTS.get(sport, {})
-        emoji = sport_info.get('emoji', '⚽')
-        name = sport_info.get('name', sport)
-        
-        text = f"{emoji} **{name}**\n\n"
-        text += f"Найдено матчей: {len(matches)}\n\n"
-        text += "Нажмите на матч, чтобы открыть трансляцию на livetv.sx\n\n"
-        
-        # Показываем матчи с временем и лигой (лимит для Telegram)
-        max_matches_to_show = min(len(matches), 20)
-        for i, match in enumerate(matches[:max_matches_to_show], 1):
-            text += f"{i}. {match['title']}\n"
-            text += f"   {match['status']} {match['time']}\n"
-            text += f"   {match['league']}\n\n"
-        
-        if len(matches) > max_matches_to_show:
-            text += f"... и еще {len(matches) - max_matches_to_show} матчей\n"
-        
-        # Формируем кнопки для каждого матча (лимит 10 кнопок)
-        keyboard_buttons = []
-        for match in matches[:10]:
-            # Сокращаем текст кнопки до 60 символов
-            button_text = f"{match['status']} {match['time']} - {match['title'][:40]}"
-            if len(button_text) > 60:
-                button_text = button_text[:57] + "..."
-            keyboard_buttons.append([
-                InlineKeyboardButton(text=button_text, url=match['url'])
-            ])
-        
-        keyboard_buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="select_sport")])
-        
-        # Если текст слишком длинный, обрезаем
-        if len(text) > 4000:
-            text = f"{emoji} **{name}**\n\n"
-            text += f"Найдено матчей: {len(matches)}\n\n"
-            text += "Нажмите на матч, чтобы открыть трансляцию на livetv.sx"
-        
-        await callback.message.edit_text(
-            text,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_buttons),
-            parse_mode="Markdown"
-        )
-    
-    except Exception as e:
-        logger.error(f"❌ Ошибка при загрузке матчей: {e}")
-        import traceback
-        traceback.print_exc()
-        await callback.message.edit_text(
-            "❌ Ошибка при загрузке матчей. Попробуйте позже.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="select_sport")],
-            ])
-        )
+# ============ ПОИСК ============
 
-
-@dp.callback_query(F.data == "about")
-async def about(callback: types.CallbackQuery):
-    """Информация о боте"""
-    await callback.message.edit_text(
-        "ℹ️ **О FutLive Bot**\n\n"
-        "Это бот для просмотра матчей и трансляций.\n\n"
-        "✨ **Возможности:**\n"
-        "⚽ Список матчей по видам спорта\n"
-        "📺 Прямые ссылки на трансляции на livetv.sx\n"
-        "🔴 Информация о статусе матча (LIVE/UPCOMING)\n"
-        "⏱️ Время начала матча\n"
-        "🏆 Фильтрация по виду спорта\n\n"
-        "🔗 **Источники:**\n"
-        "- livetv.sx - трансляции матчей\n\n"
-        "📧 **Контакты:**\n"
-        "Для вопросов и предложений пишите разработчику.",
+@dp.callback_query(F.data == "search")
+async def search_start(cb: types.CallbackQuery, state: FSMContext):
+    await cb.message.edit_text(
+        "🔍 <b>Поиск матчей</b>\n\n"
+        "Введите название команды или матча:\n"
+        "(например: Эспаньол, Барселона, Реал)",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="menu")]
         ]),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
+    await state.set_state(SubscribeStates.waiting_for_search)
+    await cb.answer()
 
 
-@dp.callback_query(F.data == "back_to_menu")
-async def back_to_menu(callback: types.CallbackQuery):
-    """Вернуться в главное меню"""
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🏆 Выбрать спорт", callback_data="select_sport")],
-        [InlineKeyboardButton(text="ℹ️ О боте", callback_data="about")],
-    ])
+@dp.message(SubscribeStates.waiting_for_search)
+async def process_search(message: types.Message, state: FSMContext):
+    query = message.text.strip()
     
-    await callback.message.edit_text(
-        "👋 Главное меню\n\n"
-        "Выберите действие:",
-        reply_markup=keyboard
+    if len(query) < 2:
+        await message.answer("❌ Слишком короткий запрос.")
+        return
+    
+    matches = find_team_matches(query, cache["matches"])
+    
+    if not matches:
+        await message.answer(f"😔 Матчи с «{query}» не найдены.", reply_markup=get_main_menu())
+        await state.clear()
+        return
+    
+    live = [m for m in matches if "LIVE" in m["status"]]
+    other = [m for m in matches if "LIVE" not in m["status"]]
+    
+    text = f"🔍 <b>Результаты: «{query}»</b>\n\nНайдено: {len(matches)} матчей\n🔴 LIVE: {len(live)}"
+    
+    btns = []
+    for m in live[:5] + other[:5]:
+        prefix = "🔴" if "LIVE" in m["status"] else f"⏱️{m['time']}"
+        btns.append([InlineKeyboardButton(text=f"{prefix} {m['title'][:35]}", callback_data=f"m_{m['id']}")])
+    
+    btns.append([InlineKeyboardButton(text="⬅️ Меню", callback_data="menu")])
+    
+    await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), parse_mode="HTML")
+    await state.clear()
+
+
+# ============ ПРОСМОТР МАТЧЕЙ ============
+
+@dp.callback_query(F.data == "live")
+async def show_live(cb: types.CallbackQuery):
+    matches = [m for m in cache["matches"] if "LIVE" in m["status"]]
+    
+    if not matches:
+        await cb.answer("Нет LIVE трансляций", show_alert=True)
+        return
+    
+    text = f"🔴 <b>LIVE трансляции</b> ({len(matches)})\n\n👇 Выберите матч:"
+    
+    btns = []
+    for m in matches[:10]:
+        btns.append([InlineKeyboardButton(text=f"🔴 {m['title'][:38]}", callback_data=f"m_{m['id']}")])
+    
+    btns.append([InlineKeyboardButton(text="⬅️ Меню", callback_data="menu")])
+    
+    await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), parse_mode="HTML")
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "all")
+async def show_all(cb: types.CallbackQuery):
+    matches = cache["matches"]
+    
+    if not matches:
+        await cb.answer("Загрузка...", show_alert=True)
+        return
+    
+    live = [m for m in matches if "LIVE" in m["status"]]
+    other = [m for m in matches if "LIVE" not in m["status"]]
+    
+    text = f"📋 <b>Все матчи</b> ({len(matches)})\n🔴 LIVE: {len(live)}"
+    
+    btns = []
+    for m in live[:5]:
+        btns.append([InlineKeyboardButton(text=f"🔴 {m['title'][:38]}", callback_data=f"m_{m['id']}")])
+    for m in other[:5]:
+        btns.append([InlineKeyboardButton(text=f"⏱️ {m['time']} {m['title'][:30]}", callback_data=f"m_{m['id']}")])
+    
+    btns.append([InlineKeyboardButton(text="⬅️ Меню", callback_data="menu")])
+    
+    await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), parse_mode="HTML")
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "sports")
+async def show_sports(cb: types.CallbackQuery):
+    by_sport = cache["by_sport"]
+    
+    if not by_sport:
+        await cb.answer("Загрузка...", show_alert=True)
+        return
+    
+    btns = []
+    for sk, matches in sorted(by_sport.items(), key=lambda x: -len(x[1])):
+        info = SPORTS.get(sk, {})
+        e = info.get('emoji', '⚽')
+        n = info.get('name', sk)
+        btns.append([InlineKeyboardButton(text=f"{e} {n} ({len(matches)})", callback_data=f"s_{sk}")])
+    btns.append([InlineKeyboardButton(text="⬅️ Меню", callback_data="menu")])
+    
+    await cb.message.edit_text(f"🏆 <b>Выберите спорт</b> ({len(cache['matches'])} матчей)", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), parse_mode="HTML")
+    await cb.answer()
+
+
+@dp.callback_query(F.data.startswith("s_"))
+async def show_sport(cb: types.CallbackQuery):
+    sport = cb.data[2:]
+    matches = cache["by_sport"].get(sport, [])
+    info = SPORTS.get(sport, {})
+    
+    if not matches:
+        await cb.answer("Нет матчей", show_alert=True)
+        return
+    
+    live = [m for m in matches if "LIVE" in m["status"]]
+    other = [m for m in matches if "LIVE" not in m["status"]]
+    
+    text = f"{info.get('emoji','⚽')} <b>{info.get('name', sport)}</b>\n🔴 LIVE: {len(live)}"
+    
+    btns = []
+    for m in live[:5] + other[:5]:
+        prefix = "🔴" if "LIVE" in m["status"] else f"⏱️{m['time']}"
+        btns.append([InlineKeyboardButton(text=f"{prefix} {m['title'][:35]}", callback_data=f"m_{m['id']}")])
+    btns.append([InlineKeyboardButton(text="⬅️", callback_data="sports")])
+    
+    await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), parse_mode="HTML")
+    await cb.answer()
+
+
+@dp.callback_query(F.data.startswith("m_"))
+async def show_match(cb: types.CallbackQuery):
+    mid = cb.data[2:]
+    match = next((m for m in cache["matches"] if m["id"] == mid), None)
+    
+    if not match:
+        await cb.answer("Матч не найден", show_alert=True)
+        return
+    
+    web_app_url = get_web_app_url(match)
+    ace_play_url = get_web_app_url(match, auto_play=True)
+    
+    text = f"📺 <b>{match['title']}</b>\n\n{match['status']} {match['time']}\n"
+    if match.get('league'):
+        text += f"🏆 {match['league']}\n"
+    
+    text += "\n👇 <b>Выберите способ просмотра:</b>"
+    
+    btns = [
+        [InlineKeyboardButton(text="📺 Красивый плеер", web_app=WebAppInfo(url=web_app_url))],
+        [InlineKeyboardButton(text="🚀 Открыть в Ace Player", web_app=WebAppInfo(url=ace_play_url))],
+        [InlineKeyboardButton(text="🔗 Классический (livetv.sx)", url=match['url'])],
+    ]
+    
+    # Показываем Ace Stream источники
+    acestreams = match.get('acestreams', [])
+    if acestreams:
+        text += format_acestream_sources(acestreams)
+        text += "\n<i>↩️ Нажмите на ссылку чтобы скопировать</i>"
+    elif match.get('acestream'):
+        text += f"\n\n<b>📺 Ace Stream:</b>\n<code>{match['acestream']}</code>"
+        text += "\n<i>↩️ Скопируйте для Ace Player</i>"
+    
+    text += "\n\n💡 <i>Ace Player: acestream.org</i>"
+    
+    btns.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back")])
+    
+    await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), parse_mode="HTML", disable_web_page_preview=True)
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "back")
+async def go_back(cb: types.CallbackQuery):
+    await show_all(cb)
+
+
+@dp.callback_query(F.data == "help")
+async def show_help(cb: types.CallbackQuery):
+    text = (
+        "ℹ️ <b>Как смотреть трансляции</b>\n\n"
+        "<b>📺 Красивый плеер:</b>\n"
+        "Откроется внутри Telegram с удобным\n"
+        "интерфейсом! Рекомендуется!\n\n"
+        "<b>🚀 Открыть в Ace Player:</b>\n"
+        "Автоматически откроет трансляцию\n"
+        "в установленном Ace Player!\n\n"
+        "<b>🔗 Классический:</b>\n"
+        "Откроется на сайте livetv.sx\n\n"
+        "<b>📺 Ace Stream ссылки:</b>\n"
+        "Нажмите на ссылку чтобы скопировать\n"
+        "и вставьте в Ace Player\n\n"
+        "📥 <b>Ace Player:</b> acestream.org\n"
+        "📡 <b>Источник:</b> livetv.sx"
     )
+    await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Меню", callback_data="menu")]
+    ]), parse_mode="HTML")
+    await cb.answer()
 
 
 async def on_shutdown():
-    """Корректное завершение работы"""
-    logger.info("🛑 Завершение работы бота...")
-    
-    # Закрываем браузер
-    await match_finder.close_browser()
-    
-    # Закрываем сессию бота
+    logger.info("🛑 Бот остановлен")
+    await finder.close_browser()
     await bot.session.close()
-    
-    logger.info("✅ Бот успешно остановлен")
-
-
-def signal_handler(signum, frame):
-    """Обработчик сигналов для graceful shutdown"""
-    logger.info(f"📢 Получен сигнал {signum}, останавливаю бота...")
-    bot_state.is_running = False
-    # Создаем новую event loop для shutdown
-    asyncio.run(on_shutdown())
-    sys.exit(0)
 
 
 async def main():
-    """Основная функция"""
-    logger.info("🚀 Запуск FutLive Bot...")
-    logger.info(f"🤖 Бот запущен")
+    logger.info("🚀 FutLive Bot запущен!")
     
-    # Регистрируем обработчики сигналов
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGINT, signal_handler)
+    asyncio.create_task(refresh_cache())
+    
+    matches = await finder.find_live_matches()
+    seen = set()
+    unique = []
+    for m in matches:
+        if m["id"] not in seen:
+            seen.add(m["id"])
+            unique.append(m)
+    by_sport = {}
+    for m in unique:
+        by_sport.setdefault(m['sport'], []).append(m)
+    global cache
+    cache = {"matches": unique, "by_sport": by_sport, "ready": True, "last_update": datetime.now().timestamp()}
+    logger.info(f"✅ Загружено: {len(unique)} матчей")
+    
+    signal.signal(signal.SIGTERM, lambda s, f: (asyncio.run(on_shutdown()), sys.exit(0)))
+    signal.signal(signal.SIGINT, lambda s, f: (asyncio.run(on_shutdown()), sys.exit(0)))
     
     try:
-        await dp.start_polling(
-            bot, 
-            allowed_updates=dp.resolve_used_update_types(),
-            handle_signals=False  # Мы сами обрабатываем сигналы
-        )
-    except Exception as e:
-        logger.error(f"❌ Ошибка при запуске бота: {e}")
-        import traceback
-        traceback.print_exc()
-        raise
+        await dp.start_polling(bot, handle_signals=False)
     finally:
         await on_shutdown()
 
