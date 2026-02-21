@@ -203,7 +203,10 @@ class MatchFinder:
                     sport = self._detect_sport(title)
                     
                     # Извлекаем информацию
+                    import hashlib
+                    match_id = hashlib.md5(url.encode()).hexdigest()[:10] if url else str(hash(title))
                     match_info = {
+                        'id': match_id,
                         'title': title,
                         'sport': sport,
                         'time': self._extract_time(title),
