@@ -33,8 +33,8 @@ TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 if not TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN не установлен!")
 
-# URL для Web App (GitHub Pages)
-WEB_APP_URL = "https://pechenje101.github.io/FutLive_bot/"
+# URL для Web App (Vercel)
+WEB_APP_URL = "https://my-project-three-omega-40.vercel.app"
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -313,6 +313,22 @@ async def show_match(cb: types.CallbackQuery):
         await cb.answer("Матч не найден", show_alert=True)
         return
     
+    # Извлекаем Ace Stream ссылки если их нет
+    if not match.get('acestreams'):
+        await cb.answer("⏳ Загрузка источников...", show_alert=False)
+        try:
+            acestreams = await finder.get_match_acestreams(match['url'])
+            if acestreams:
+                match['acestreams'] = acestreams
+                # Обновляем в кэше
+                for m in cache["matches"]:
+                    if m["id"] == mid:
+                        m['acestreams'] = acestreams
+                        break
+                logger.info(f"✅ Ace Stream для {match['title']}: {len(acestreams)} источников")
+        except Exception as e:
+            logger.error(f"Ошибка извлечения Ace Stream: {e}")
+    
     web_app_url = get_web_app_url(match)
     ace_play_url = get_web_app_url(match, auto_play=True)
     
@@ -336,13 +352,15 @@ async def show_match(cb: types.CallbackQuery):
     elif match.get('acestream'):
         text += f"\n\n<b>📺 Ace Stream:</b>\n<code>{match['acestream']}</code>"
         text += "\n<i>↩️ Скопируйте для Ace Player</i>"
+    else:
+        text += "\n\n⚠️ <i>Ace Stream источники не найдены</i>"
+        text += "\n💡 Попробуйте открыть на LiveTV"
     
     text += "\n\n💡 <i>Ace Player: acestream.org</i>"
     
     btns.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back")])
     
     await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), parse_mode="HTML", disable_web_page_preview=True)
-    await cb.answer()
 
 
 @dp.callback_query(F.data == "back")

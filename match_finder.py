@@ -317,3 +317,79 @@ class MatchFinder:
         """Закрывает браузер (публичный метод)"""
         await self._close_browser_internal()
         logger.info("✅ Браузер закрыт")
+    
+    async def get_match_acestreams(self, match_url: str) -> list:
+        """Извлекает Ace Stream ссылки со страницы матча"""
+        try:
+            logger.info(f"🎥 Извлечение Ace Stream ссылок: {match_url}")
+            
+            # Загружаем страницу матча
+            success = await self._retry_request(match_url)
+            if not success:
+                return []
+            
+            # Ждём загрузки контента
+            await asyncio.sleep(3)
+            
+            # Ищем acestream ссылки на странице
+            page_content = await self.page.content()
+            
+            # Паттерны для поиска acestream
+            acestreams = []
+            
+            # Прямые acestream:// ссылки
+            ace_matches = re.findall(r'acestream://([a-f0-9]{40})', page_content, re.IGNORECASE)
+            for ace_id in ace_matches:
+                acestreams.append(f"acestream://{ace_id}")
+            
+            # Если не нашли прямые ссылки, пробуем JavaScript
+            if not acestreams:
+                # Пытаемся найти ссылки через JS
+                js_acestreams = await self.page.evaluate("""
+                () => {
+                    const results = [];
+                    const pageText = document.body.innerText;
+                    const pageHTML = document.body.innerHTML;
+                    
+                    // Ищем acestream:// ссылки
+                    const aceRegex = /acestream:\\/\\/([a-f0-9]{40})/gi;
+                    let match;
+                    while ((match = aceRegex.exec(pageHTML)) !== null) {
+                        results.push('acestream://' + match[1]);
+                    }
+                    
+                    // Ищем data-id или contentid
+                    document.querySelectorAll('[data-id], [data-contentid], [data-acestream]').forEach(el => {
+                        const id = el.dataset.id || el.dataset.contentid || el.dataset.acestream;
+                        if (id && id.length === 40 && /^[a-f0-9]{40}$/i.test(id)) {
+                            results.push('acestream://' + id);
+                        }
+                    });
+                    
+                    // Ищем в onclick атрибутах
+                    document.querySelectorAll('[onclick]').forEach(el => {
+                        const onclick = el.getAttribute('onclick') || '';
+                        const match = onclick.match(/([a-f0-9]{40})/i);
+                        if (match) {
+                            results.push('acestream://' + match[1]);
+                        }
+                    });
+                    
+                    return [...new Set(results)];
+                }
+                """)
+                
+                if js_acestreams:
+                    acestreams.extend(js_acestreams)
+            
+            # Убираем дубликаты
+            acestreams = list(set(acestreams))
+            
+            logger.info(f"✅ Найдено Ace Stream ссылок: {len(acestreams)}")
+            return acestreams
+        
+        except Exception as e:
+            logger.error(f"❌ Ошибка при извлечении Ace Stream: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
