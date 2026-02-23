@@ -1,6 +1,6 @@
 """
 FutLive Bot - Telegram бот для просмотра матчей и трансляций
-С Web App плеером и поддержкой прямого открытия Ace Player
+Оптимизированная версия
 """
 
 import asyncio
@@ -10,7 +10,7 @@ import sys
 import re
 import urllib.parse
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
@@ -40,8 +40,26 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 finder = MatchFinder()
 
-# Кэш матчей
-cache = {"matches": [], "by_sport": {}, "ready": False, "last_update": 0}
+# Кэш с меткой времени
+cache = {
+    "matches": [], 
+    "by_sport": {}, 
+    "ready": False, 
+    "last_update": 0,
+    "update_interval": 60,  # Обновление каждую минуту
+}
+
+# Языки для Ace Stream
+LANGUAGE_MARKERS = [
+    {'flag': '🇷🇺', 'name': 'Русский'},
+    {'flag': '🇬🇧', 'name': 'English'},
+    {'flag': '🇩🇪', 'name': 'Deutsch'},
+    {'flag': '🇪🇸', 'name': 'Español'},
+    {'flag': '🇮🇹', 'name': 'Italiano'},
+    {'flag': '🇫🇷', 'name': 'Français'},
+    {'flag': '🇵🇹', 'name': 'Português'},
+    {'flag': '🌍', 'name': 'Other'},
+]
 
 
 class SubscribeStates(StatesGroup):
@@ -83,61 +101,19 @@ def get_web_app_url(match: dict, auto_play: bool = False) -> str:
     return WEB_APP_URL + '?' + urllib.parse.urlencode(params)
 
 
-async def refresh_cache():
-    """Обновляет кэш матчей"""
-    global cache
-    while True:
-        try:
-            matches = await finder.find_live_matches(force_refresh=True)
-            seen = set()
-            unique_matches = []
-            for m in matches:
-                if m["id"] not in seen:
-                    seen.add(m["id"])
-                    unique_matches.append(m)
-            
-            by_sport = {}
-            for m in unique_matches:
-                by_sport.setdefault(m['sport'], []).append(m)
-            
-            cache = {
-                "matches": unique_matches,
-                "by_sport": by_sport,
-                "ready": True,
-                "last_update": datetime.now().timestamp()
-            }
-            logger.info(f"📦 Кэш: {len(unique_matches)} матчей")
-        except Exception as e:
-            logger.error(f"Ошибка обновления: {e}")
-        await asyncio.sleep(90)
-
-
-# Language markers for Ace Stream sources
-LANGUAGE_MARKERS = [
-    {'flag': '🇷🇺', 'name': 'Русский'},
-    {'flag': '🇬🇧', 'name': 'English'},
-    {'flag': '🇩🇪', 'name': 'Deutsch'},
-    {'flag': '🇪🇸', 'name': 'Español'},
-    {'flag': '🇮🇹', 'name': 'Italiano'},
-    {'flag': '🇫🇷', 'name': 'Français'},
-    {'flag': '🇵🇹', 'name': 'Português'},
-    {'flag': '🌍', 'name': 'Other'},
-]
-
-
 def format_acestream_sources(acestreams: list) -> str:
-    """Форматирует список Ace Stream ссылок с маркировкой языка"""
+    """Форматирует список Ace Stream ссылок"""
     if not acestreams:
         return ""
     
-    result = f"\n\n<b>📺 Ace Stream ({len(acestreams)} источн.):</b>\n"
+    result = f"\n\n<b>📺 Ace Stream ({len(acestreams)} источников):</b>\n"
     
-    for i, link in enumerate(acestreams[:5]):
+    for i, link in enumerate(acestreams[:6]):
         lang_info = LANGUAGE_MARKERS[i] if i < len(LANGUAGE_MARKERS) else LANGUAGE_MARKERS[-1]
         result += f"{i+1}. {lang_info['flag']} {lang_info['name']}\n   <code>{link}</code>\n"
     
-    if len(acestreams) > 5:
-        result += f"\n<i>... и еще {len(acestreams) - 5} источников</i>"
+    if len(acestreams) > 6:
+        result += f"\n<i>... и еще {len(acestreams) - 6} источников</i>"
     
     return result
 
@@ -152,9 +128,63 @@ def get_main_menu():
     ])
 
 
+async def refresh_cache():
+    """Обновляет кэш матчей"""
+    global cache
+    
+    while True:
+        try:
+            now = datetime.now().timestamp()
+            
+            # Check if update needed
+            if now - cache["last_update"] < cache["update_interval"]:
+                await asyncio.sleep(5)
+                continue
+            
+            logger.info("🔄 Обновление кэша...")
+            
+            matches = await finder.find_live_matches()
+            
+            if matches:
+                # Remove duplicates by id
+                seen = set()
+                unique = []
+                for m in matches:
+                    if m["id"] not in seen:
+                        seen.add(m["id"])
+                        unique.append(m)
+                
+                # Group by sport
+                by_sport = {}
+                for m in unique:
+                    by_sport.setdefault(m['sport'], []).append(m)
+                
+                cache = {
+                    "matches": unique,
+                    "by_sport": by_sport,
+                    "ready": True,
+                    "last_update": now,
+                    "update_interval": cache["update_interval"],
+                }
+                
+                live_count = sum(1 for m in unique if "LIVE" in m["status"])
+                logger.info(f"✅ Кэш: {len(unique)} матчей, {live_count} LIVE")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка обновления кэша: {e}")
+        
+        await asyncio.sleep(30)
+
+
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
-    text = "🏆 <b>FutLive Bot</b>\n\nСмотрите трансляции в один клик!\n\n👇 <b>Выберите:</b>"
+    live_count = sum(1 for m in cache["matches"] if "LIVE" in m["status"])
+    
+    text = f"🏆 <b>FutLive Bot</b>\n\n"
+    text += f"📊 Матчей: {len(cache['matches'])}\n"
+    text += f"🔴 LIVE: {live_count}\n\n"
+    text += "👇 <b>Выберите:</b>"
+    
     await message.answer(text, reply_markup=get_main_menu(), parse_mode="HTML")
 
 
@@ -170,8 +200,8 @@ async def go_menu(cb: types.CallbackQuery):
 async def search_start(cb: types.CallbackQuery, state: FSMContext):
     await cb.message.edit_text(
         "🔍 <b>Поиск матчей</b>\n\n"
-        "Введите название команды или матча:\n"
-        "(например: Эспаньол, Барселона, Реал)",
+        "Введите название команды:\n"
+        "(например: Эспаньол, Барселона)",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="❌ Отмена", callback_data="menu")]
         ]),
@@ -186,7 +216,7 @@ async def process_search(message: types.Message, state: FSMContext):
     query = message.text.strip()
     
     if len(query) < 2:
-        await message.answer("❌ Слишком короткий запрос.")
+        await message.answer("❌ Минимум 2 символа.")
         return
     
     matches = find_team_matches(query, cache["matches"])
@@ -197,12 +227,11 @@ async def process_search(message: types.Message, state: FSMContext):
         return
     
     live = [m for m in matches if "LIVE" in m["status"]]
-    other = [m for m in matches if "LIVE" not in m["status"]]
     
     text = f"🔍 <b>Результаты: «{query}»</b>\n\nНайдено: {len(matches)} матчей\n🔴 LIVE: {len(live)}"
     
     btns = []
-    for m in live[:5] + other[:5]:
+    for m in matches[:8]:
         prefix = "🔴" if "LIVE" in m["status"] else f"⏱️{m['time']}"
         btns.append([InlineKeyboardButton(text=f"{prefix} {m['title'][:35]}", callback_data=f"m_{m['id']}")])
     
@@ -219,10 +248,10 @@ async def show_live(cb: types.CallbackQuery):
     matches = [m for m in cache["matches"] if "LIVE" in m["status"]]
     
     if not matches:
-        await cb.answer("Нет LIVE трансляций", show_alert=True)
+        await cb.answer("Нет LIVE трансляций сейчас", show_alert=True)
         return
     
-    text = f"🔴 <b>LIVE трансляции</b> ({len(matches)})\n\n👇 Выберите матч:"
+    text = f"🔴 <b>LIVE трансляции</b> ({len(matches)})"
     
     btns = []
     for m in matches[:10]:
@@ -239,18 +268,22 @@ async def show_all(cb: types.CallbackQuery):
     matches = cache["matches"]
     
     if not matches:
-        await cb.answer("Загрузка...", show_alert=True)
+        await cb.answer("Загрузка матчей...", show_alert=True)
         return
     
     live = [m for m in matches if "LIVE" in m["status"]]
-    other = [m for m in matches if "LIVE" not in m["status"]]
+    upcoming = [m for m in matches if "LIVE" not in m["status"]]
     
     text = f"📋 <b>Все матчи</b> ({len(matches)})\n🔴 LIVE: {len(live)}"
     
     btns = []
+    
+    # Show LIVE first
     for m in live[:5]:
         btns.append([InlineKeyboardButton(text=f"🔴 {m['title'][:38]}", callback_data=f"m_{m['id']}")])
-    for m in other[:5]:
+    
+    # Then upcoming
+    for m in upcoming[:5]:
         btns.append([InlineKeyboardButton(text=f"⏱️ {m['time']} {m['title'][:30]}", callback_data=f"m_{m['id']}")])
     
     btns.append([InlineKeyboardButton(text="⬅️ Меню", callback_data="menu")])
@@ -272,7 +305,9 @@ async def show_sports(cb: types.CallbackQuery):
         info = SPORTS.get(sk, {})
         e = info.get('emoji', '⚽')
         n = info.get('name', sk)
-        btns.append([InlineKeyboardButton(text=f"{e} {n} ({len(matches)})", callback_data=f"s_{sk}")])
+        live_count = sum(1 for m in matches if "LIVE" in m["status"])
+        btns.append([InlineKeyboardButton(text=f"{e} {n} ({len(matches)}) 🔴{live_count}", callback_data=f"s_{sk}")])
+    
     btns.append([InlineKeyboardButton(text="⬅️ Меню", callback_data="menu")])
     
     await cb.message.edit_text(f"🏆 <b>Выберите спорт</b> ({len(cache['matches'])} матчей)", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), parse_mode="HTML")
@@ -313,9 +348,10 @@ async def show_match(cb: types.CallbackQuery):
         await cb.answer("Матч не найден", show_alert=True)
         return
     
-    # Извлекаем Ace Stream ссылки если их нет
+    # Показываем сообщение о загрузке
     if not match.get('acestreams'):
-        await cb.answer("⏳ Загрузка источников...", show_alert=False)
+        await cb.answer("⏳ Поиск источников...", show_alert=False)
+        
         try:
             acestreams = await finder.get_match_acestreams(match['url'])
             if acestreams:
@@ -325,23 +361,22 @@ async def show_match(cb: types.CallbackQuery):
                     if m["id"] == mid:
                         m['acestreams'] = acestreams
                         break
-                logger.info(f"✅ Ace Stream для {match['title']}: {len(acestreams)} источников")
+                logger.info(f"✅ Ace Stream для {match['title'][:30]}: {len(acestreams)} источников")
         except Exception as e:
-            logger.error(f"Ошибка извлечения Ace Stream: {e}")
+            logger.error(f"Ошибка поиска Ace Stream: {e}")
     
     web_app_url = get_web_app_url(match)
-    ace_play_url = get_web_app_url(match, auto_play=True)
     
-    text = f"📺 <b>{match['title']}</b>\n\n{match['status']} {match['time']}\n"
+    text = f"📺 <b>{match['title']}</b>\n\n"
+    text += f"{match['status']} {match['time']}\n"
+    
     if match.get('league'):
         text += f"🏆 {match['league']}\n"
     
-    text += "\n👇 <b>Выберите способ просмотра:</b>"
+    text += "\n👇 <b>Способы просмотра:</b>"
     
     btns = [
-        [InlineKeyboardButton(text="📺 Красивый плеер", web_app=WebAppInfo(url=web_app_url))],
-        [InlineKeyboardButton(text="🚀 Открыть в Ace Player", web_app=WebAppInfo(url=ace_play_url))],
-        [InlineKeyboardButton(text="🔗 Классический (livetv.sx)", url=match['url'])],
+        [InlineKeyboardButton(text="🌐 Открыть на LiveTV", url=match['url'])],
     ]
     
     # Показываем Ace Stream источники
@@ -349,12 +384,12 @@ async def show_match(cb: types.CallbackQuery):
     if acestreams:
         text += format_acestream_sources(acestreams)
         text += "\n<i>↩️ Нажмите на ссылку чтобы скопировать</i>"
-    elif match.get('acestream'):
-        text += f"\n\n<b>📺 Ace Stream:</b>\n<code>{match['acestream']}</code>"
-        text += "\n<i>↩️ Скопируйте для Ace Player</i>"
+        
+        # Добавляем кнопку Web App если есть acestreams
+        btns.insert(0, [InlineKeyboardButton(text="📺 Красивый плеер", web_app=WebAppInfo(url=web_app_url))])
     else:
-        text += "\n\n⚠️ <i>Ace Stream источники не найдены</i>"
-        text += "\n💡 Попробуйте открыть на LiveTV"
+        text += "\n\n⚠️ <i>Ace Stream источники не найдены.</i>"
+        text += "\n💡 Откройте на LiveTV для просмотра"
     
     text += "\n\n💡 <i>Ace Player: acestream.org</i>"
     
@@ -372,17 +407,14 @@ async def go_back(cb: types.CallbackQuery):
 async def show_help(cb: types.CallbackQuery):
     text = (
         "ℹ️ <b>Как смотреть трансляции</b>\n\n"
+        "<b>🌐 Открыть на LiveTV:</b>\n"
+        "Откроет официальный сайт с плеером\n\n"
         "<b>📺 Красивый плеер:</b>\n"
-        "Откроется внутри Telegram с удобным\n"
-        "интерфейсом! Рекомендуется!\n\n"
-        "<b>🚀 Открыть в Ace Player:</b>\n"
-        "Автоматически откроет трансляцию\n"
-        "в установленном Ace Player!\n\n"
-        "<b>🔗 Классический:</b>\n"
-        "Откроется на сайте livetv.sx\n\n"
+        "Web App плеер внутри Telegram\n"
+        "Требует установленный Ace Player\n\n"
         "<b>📺 Ace Stream ссылки:</b>\n"
-        "Нажмите на ссылку чтобы скопировать\n"
-        "и вставьте в Ace Player\n\n"
+        "Нажмите на ссылку → скопируйте\n"
+        "Вставьте в Ace Player\n\n"
         "📥 <b>Ace Player:</b> acestream.org\n"
         "📡 <b>Источник:</b> livetv.sx"
     )
@@ -401,21 +433,31 @@ async def on_shutdown():
 async def main():
     logger.info("🚀 FutLive Bot запущен!")
     
+    # Запускаем обновление кэша
     asyncio.create_task(refresh_cache())
     
+    # Начальная загрузка
+    logger.info("📥 Загрузка матчей...")
     matches = await finder.find_live_matches()
-    seen = set()
-    unique = []
-    for m in matches:
-        if m["id"] not in seen:
-            seen.add(m["id"])
-            unique.append(m)
-    by_sport = {}
-    for m in unique:
-        by_sport.setdefault(m['sport'], []).append(m)
-    global cache
-    cache = {"matches": unique, "by_sport": by_sport, "ready": True, "last_update": datetime.now().timestamp()}
-    logger.info(f"✅ Загружено: {len(unique)} матчей")
+    
+    if matches:
+        seen = set()
+        unique = []
+        for m in matches:
+            if m["id"] not in seen:
+                seen.add(m["id"])
+                unique.append(m)
+        
+        by_sport = {}
+        for m in unique:
+            by_sport.setdefault(m['sport'], []).append(m)
+        
+        cache["matches"] = unique
+        cache["by_sport"] = by_sport
+        cache["ready"] = True
+        cache["last_update"] = datetime.now().timestamp()
+        
+        logger.info(f"✅ Загружено: {len(unique)} матчей")
     
     signal.signal(signal.SIGTERM, lambda s, f: (asyncio.run(on_shutdown()), sys.exit(0)))
     signal.signal(signal.SIGINT, lambda s, f: (asyncio.run(on_shutdown()), sys.exit(0)))
