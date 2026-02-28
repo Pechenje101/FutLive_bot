@@ -1,0 +1,11 @@
+services:
+  - type: worker
+    name: futlive-bot
+    env: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: PYTHONUNBUFFERED
+        value: "1"

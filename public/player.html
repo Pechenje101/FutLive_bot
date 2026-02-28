@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FutLive Player - Локальный плеер</title>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            background: #0d0d1a; 
+            color: #fff; 
+            font-family: system-ui, -apple-system, sans-serif;
+            min-height: 100vh;
+        }
+        .header {
+            padding: 16px;
+            background: linear-gradient(180deg, rgba(231,76,60,0.2) 0%, transparent 100%);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+        .logo { display: flex; align-items: center; gap: 8px; font-size: 20px; font-weight: 700; }
+        .status { 
+            padding: 6px 14px; 
+            border-radius: 16px; 
+            font-size: 12px; 
+            font-weight: 600;
+        }
+        .status.online { background: #27ae60; }
+        .status.offline { background: #7f8c8d; }
+        .status.loading { background: #f39c12; }
+
+        .match-info {
+            padding: 16px;
+            text-align: center;
+            background: rgba(255,255,255,0.03);
+        }
+        .match-title { font-size: 18px; font-weight: 700; margin-bottom: 8px; }
+        .match-meta { color: #888; font-size: 13px; }
+
+        .video-container {
+            position: relative;
+            width: 100%;
+            background: #000;
+        }
+        .video-wrapper {
+            position: relative;
+            padding-top: 56.25%;
+        }
+        video {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: #000;
+        }
+        .overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: #1a1a2e;
+            color: #888;
+            gap: 16px;
+            padding: 20px;
+            text-align: center;
+        }
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 4px solid rgba(255,255,255,0.1);
+            border-top-color: #e74c3c;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .sources {
+            padding: 16px;
+        }
+        .section-title {
+            font-size: 13px;
+            color: #888;
+            margin-bottom: 12px;
+            font-weight: 600;
+        }
+        .source-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 14px;
+            background: rgba(255,255,255,0.05);
+            border-radius: 12px;
+            margin-bottom: 8px;
+            cursor: pointer;
+            transition: all 0.2s;
+            border: 2px solid transparent;
+        }
+        .source-item:hover {
+            background: rgba(255,255,255,0.08);
+        }
+        .source-item.active {
+            background: rgba(46,204,113,0.15);
+            border-color: #2ecc71;
+        }
+        .source-flag { font-size: 24px; }
+        .source-info { flex: 1; }
+        .source-name { font-weight: 600; font-size: 14px; }
+        .source-status { font-size: 11px; color: #666; margin-top: 2px; }
+        .source-item.active .source-status { color: #2ecc71; }
+        .btn {
+            padding: 10px 16px;
+            border: none;
+            border-radius: 10px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .btn-primary { background: #2ecc71; color: #fff; }
+        .btn-danger { background: #e74c3c; color: #fff; }
+        .btn-primary:hover { background: #27ae60; }
+        .btn-danger:hover { background: #c0392b; }
+
+        .input-section {
+            padding: 16px;
+            background: rgba(0,0,0,0.3);
+            border-top: 1px solid rgba(255,255,255,0.1);
+        }
+        .input-row {
+            display: flex;
+            gap: 10px;
+        }
+        .input-row input {
+            flex: 1;
+            padding: 12px 16px;
+            background: rgba(255,255,255,0.1);
+            border: 1px solid rgba(255,255,255,0.2);
+            border-radius: 10px;
+            color: #fff;
+            font-size: 14px;
+        }
+        .input-row input::placeholder { color: #666; }
+        .input-row input:focus { outline: none; border-color: #e74c3c; }
+
+        .help {
+            padding: 16px;
+            background: rgba(255,255,255,0.03);
+            margin: 16px;
+            border-radius: 12px;
+            font-size: 13px;
+            line-height: 1.7;
+            color: #888;
+        }
+        .help h3 { color: #fff; margin-bottom: 12px; }
+        .help a { color: #3498db; }
+
+        .toast {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #27ae60;
+            color: #fff;
+            padding: 12px 24px;
+            border-radius: 24px;
+            font-size: 14px;
+            font-weight: 500;
+            z-index: 1000;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+        .toast.show { opacity: 1; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="logo">
+            <span style="font-size: 24px;">⚽</span>
+            <span>FutLive Player</span>
+        </div>
+        <div id="engineStatus" class="status loading">Проверка...</div>
+    </div>
+
+    <div class="match-info">
+        <div id="matchTitle" class="match-title">Локальный плеер Ace Stream</div>
+        <div class="match-meta">Откройте этот файл в браузере для просмотра трансляций</div>
+    </div>
+
+    <div class="video-container">
+        <div class="video-wrapper">
+            <video id="video" controls playsInline></video>
+            <div id="overlay" class="overlay">
+                <div style="font-size: 48px;">📺</div>
+                <div>Введите Ace Stream ссылку или выберите источник</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="input-section">
+        <div class="input-row">
+            <input type="text" id="aceInput" placeholder="Вставьте ссылку acestream://..." />
+            <button class="btn btn-primary" onclick="playFromInput()">▶ Смотреть</button>
+        </div>
+    </div>
+
+    <div class="sources" id="sourcesSection" style="display: none;">
+        <div class="section-title">🎬 Источники трансляции:</div>
+        <div id="sourcesList"></div>
+    </div>
+
+    <div class="help">
+        <h3>💡 Как использовать:</h3>
+        <p>
+            1. Убедитесь, что <a href="https://acestream.org" target="_blank">Ace Player</a> запущен<br>
+            2. Вставьте ссылку acestream:// в поле выше<br>
+            3. Нажмите "Смотреть"<br><br>
+            <b>Этот файл работает локально и имеет доступ к Ace Stream Engine.</b>
+        </p>
+    </div>
+
+    <div id="toast" class="toast"></div>
+
+    <script>
+        const video = document.getElementById('video');
+        const overlay = document.getElementById('overlay');
+        const statusEl = document.getElementById('engineStatus');
+        const sourcesSection = document.getElementById('sourcesSection');
+        const sourcesList = document.getElementById('sourcesList');
+        const aceInput = document.getElementById('aceInput');
+        let hls = null;
+        let currentSource = null;
+        let sources = [];
+
+        // Parse URL params
+        const params = new URLSearchParams(window.location.search);
+        
+        // Load match data from params
+        const matchData = {
+            title: params.get('title') || 'Локальный плеер Ace Stream',
+            acestreams: []
+        };
+
+        try {
+            const as = params.get('acestreams');
+            if (as) matchData.acestreams = JSON.parse(decodeURIComponent(as));
+        } catch {}
+
+        document.getElementById('matchTitle').textContent = matchData.title;
+
+        if (matchData.acestreams.length > 0) {
+            sources = matchData.acestreams;
+            renderSources();
+            sourcesSection.style.display = 'block';
+        }
+
+        // Check Ace Engine
+        async function checkEngine() {
+            try {
+                const response = await fetch('http://127.0.0.1:6878/webui/api', {
+                    method: 'GET',
+                    mode: 'cors'
+                });
+                if (response.ok || response.type === 'opaque') {
+                    statusEl.textContent = '✓ Ace Engine';
+                    statusEl.className = 'status online';
+                    return true;
+                }
+            } catch (e) {
+                console.log('Engine check:', e);
+            }
+            statusEl.textContent = 'Ace offline';
+            statusEl.className = 'status offline';
+            return false;
+        }
+
+        checkEngine();
+        setInterval(checkEngine, 10000);
+
+        // Render sources
+        function renderSources() {
+            const languages = ['🇷🇺 Русский', '🇬🇧 English', '🇩🇪 Deutsch', '🇪🇸 Español', '🇮🇹 Italiano', '🇫🇷 Français', '🇵🇹 Português', '🌍 Other'];
+            
+            sourcesList.innerHTML = sources.map((link, i) => {
+                const lang = languages[i] || languages[languages.length - 1];
+                const [flag, name] = lang.split(' ');
+                const isActive = currentSource === i;
+                return `
+                    <div class="source-item ${isActive ? 'active' : ''}" onclick="playSource(${i})">
+                        <div class="source-flag">${flag}</div>
+                        <div class="source-info">
+                            <div class="source-name">${name}</div>
+                            <div class="source-status">${isActive ? '▶ Воспроизводится' : 'Нажмите для воспроизведения'}</div>
+                        </div>
+                        <button class="btn btn-primary" onclick="event.stopPropagation(); playSource(${i})">▶</button>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        // Play source
+        async function playSource(index) {
+            if (sources[index]) {
+                await playAceStream(sources[index]);
+                currentSource = index;
+                renderSources();
+            }
+        }
+
+        // Play from input
+        async function playFromInput() {
+            const url = aceInput.value.trim();
+            if (url.startsWith('acestream://')) {
+                await playAceStream(url);
+            } else {
+                showToast('Введите ссылку acestream://');
+            }
+        }
+
+        // Play Ace Stream
+        async function playAceStream(acestreamUrl) {
+            const contentId = acestreamUrl.replace('acestream://', '');
+            
+            overlay.innerHTML = '<div class="spinner"></div><div>Подключение к Ace Stream...</div>';
+            overlay.style.display = 'flex';
+
+            if (hls) {
+                hls.destroy();
+                hls = null;
+            }
+
+            const hlsUrls = [
+                `http://127.0.0.1:6878/ace/manifest.m3u8?id=${contentId}`,
+                `http://127.0.0.1:6878/ace/getstream?id=${contentId}&.m3u8`,
+            ];
+
+            for (const hlsUrl of hlsUrls) {
+                console.log('Trying:', hlsUrl);
+
+                if (Hls.isSupported()) {
+                    hls = new Hls({
+                        enableWorker: true,
+                        manifestLoadingTimeOut: 10000,
+                        manifestLoadingMaxRetry: 2,
+                    });
+
+                    try {
+                        await new Promise((resolve, reject) => {
+                            hls.loadSource(hlsUrl);
+                            hls.attachMedia(video);
+
+                            const timeout = setTimeout(() => reject(new Error('Timeout')), 15000);
+
+                            hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                                clearTimeout(timeout);
+                                overlay.style.display = 'none';
+                                video.play().catch(() => showToast('Нажмите ▶ для воспроизведения'));
+                                statusEl.textContent = '▶ Воспроизведение';
+                                statusEl.className = 'status online';
+                                resolve();
+                            });
+
+                            hls.on(Hls.Events.ERROR, (_, data) => {
+                                clearTimeout(timeout);
+                                if (data.fatal) reject(data);
+                            });
+                        });
+
+                        return;
+                    } catch (e) {
+                        console.log('HLS error:', e);
+                        hls.destroy();
+                        hls = null;
+                    }
+                } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                    // Safari
+                    video.src = hlsUrl;
+                    try {
+                        await new Promise((resolve, reject) => {
+                            const timeout = setTimeout(() => reject(new Error('Timeout')), 15000);
+                            video.addEventListener('loadedmetadata', () => {
+                                clearTimeout(timeout);
+                                overlay.style.display = 'none';
+                                video.play().catch(() => {});
+                                resolve();
+                            }, { once: true });
+                            video.addEventListener('error', () => {
+                                clearTimeout(timeout);
+                                reject(new Error('Video error'));
+                            }, { once: true });
+                        });
+                        return;
+                    } catch {
+                        video.src = '';
+                    }
+                }
+            }
+
+            overlay.innerHTML = `
+                <div style="font-size: 48px;">⚠️</div>
+                <div>Не удалось подключиться к Ace Stream Engine</div>
+                <div style="font-size: 12px; color: #666;">Убедитесь, что Ace Player запущен на порту 6878</div>
+            `;
+            statusEl.textContent = 'Ошибка';
+            statusEl.className = 'status offline';
+        }
+
+        // Toast
+        function showToast(msg) {
+            const toast = document.getElementById('toast');
+            toast.textContent = msg;
+            toast.classList.add('show');
+            setTimeout(() => toast.classList.remove('show'), 3000);
+        }
+
+        // Handle Enter key
+        aceInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') playFromInput();
+        });
+    </script>
+</body>
+</html>
