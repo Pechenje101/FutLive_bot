@@ -249,15 +249,18 @@ class MatchFinder:
         
         return ""
     
-    async def get_match_acestreams(self, match_url: str) -> List[str]:
-        """Извлечение Ace Stream ссылок"""
-        acestreams = []
+    async def get_match_data(self, match_url: str) -> Dict:
+        """Извлечение всех данных о матче: embed URL и Ace Stream ссылки"""
+        result = {
+            'embed_url': None,
+            'acestreams': []
+        }
         
         try:
-            logger.info(f"🎥 Поиск Ace Stream: {match_url}")
+            logger.info(f"🎥 Загрузка страницы матча: {match_url}")
             
             if not await self._init_browser():
-                return []
+                return result
             
             # Load match page
             await self.page.goto(match_url, wait_until="domcontentloaded", timeout=15000)
@@ -265,9 +268,46 @@ class MatchFinder:
             # Wait for dynamic content
             await asyncio.sleep(2)
             
+            # Extract embed URL (iframe src)
+            try:
+                embed_url = await self.page.evaluate("""
+                () => {
+                    // Find iframe with player
+                    const iframes = document.querySelectorAll('iframe');
+                    for (const iframe of iframes) {
+                        const src = iframe.src || iframe.getAttribute('src') || '';
+                        if (src.includes('ltvplayer') || src.includes('cdn.livetv') || src.includes('livetv')) {
+                            return src;
+                        }
+                    }
+                    
+                    // Find links to player page
+                    const links = document.querySelectorAll('a[href*="ltvplayer"], a[href*="video"]');
+                    for (const link of links) {
+                        const href = link.href;
+                        if (href && (href.includes('ltvplayer') || href.includes('cache/ltv'))) {
+                            return href;
+                        }
+                    }
+                    
+                    return null;
+                }
+                """)
+                
+                if embed_url:
+                    # Make sure URL is absolute
+                    if embed_url.startswith('//'):
+                        embed_url = 'https:' + embed_url
+                    elif not embed_url.startswith('http'):
+                        embed_url = 'https://cdn.livetv873.me' + embed_url if embed_url.startswith('/') else 'https://' + embed_url
+                    
+                    result['embed_url'] = embed_url
+                    logger.info(f"✅ Найден embed URL: {embed_url}")
+            except Exception as e:
+                logger.warning(f"Не удалось найти embed URL: {e}")
+            
             # Try to click on video links to load player
             try:
-                # Click on first video link
                 await self.page.click('a[href*="ltvplayer"], a[href*="video"]').catch(lambda: None)
                 await asyncio.sleep(2)
             except:
@@ -321,11 +361,16 @@ class MatchFinder:
             
             # Convert to acestream URLs
             for ace_id in found_ids:
-                acestreams.append(f"acestream://{ace_id}")
+                result['acestreams'].append(f"acestream://{ace_id}")
             
-            logger.info(f"✅ Найдено Ace Stream: {len(acestreams)}")
+            logger.info(f"✅ Найдено: embed_url={result['embed_url']}, acestreams={len(result['acestreams'])}")
             
         except Exception as e:
-            logger.error(f"❌ Ошибка поиска Ace Stream: {e}")
+            logger.error(f"❌ Ошибка получения данных матча: {e}")
         
-        return acestreams
+        return result
+
+    async def get_match_acestreams(self, match_url: str) -> List[str]:
+        """Извлечение только Ace Stream ссылок (для обратной совместимости)"""
+        data = await self.get_match_data(match_url)
+        return data.get('acestreams', [])

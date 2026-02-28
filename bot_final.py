@@ -90,6 +90,8 @@ def get_web_app_url(match: dict, auto_play: bool = False) -> str:
         'league': match.get('league', ''),
         'url': match['url'],
     }
+    if match.get('embed_url'):
+        params['embed'] = match['embed_url']
     if match.get('acestreams'):
         params['acestreams'] = urllib.parse.quote(json.dumps(match['acestreams']))
     elif match.get('acestream'):
@@ -348,22 +350,30 @@ async def show_match(cb: types.CallbackQuery):
         await cb.answer("Матч не найден", show_alert=True)
         return
     
-    # Показываем сообщение о загрузке
-    if not match.get('acestreams'):
-        await cb.answer("⏳ Поиск источников...", show_alert=False)
+    # Загружаем данные матча если ещё не загружены
+    if not match.get('acestreams') and not match.get('embed_url'):
+        await cb.answer("⏳ Загрузка плеера...", show_alert=False)
         
         try:
-            acestreams = await finder.get_match_acestreams(match['url'])
-            if acestreams:
-                match['acestreams'] = acestreams
+            match_data = await finder.get_match_data(match['url'])
+            if match_data:
+                if match_data.get('embed_url'):
+                    match['embed_url'] = match_data['embed_url']
+                if match_data.get('acestreams'):
+                    match['acestreams'] = match_data['acestreams']
+                
                 # Обновляем в кэше
                 for m in cache["matches"]:
                     if m["id"] == mid:
-                        m['acestreams'] = acestreams
+                        if match_data.get('embed_url'):
+                            m['embed_url'] = match_data['embed_url']
+                        if match_data.get('acestreams'):
+                            m['acestreams'] = match_data['acestreams']
                         break
-                logger.info(f"✅ Ace Stream для {match['title'][:30]}: {len(acestreams)} источников")
+                
+                logger.info(f"✅ Данные для {match['title'][:30]}: embed={bool(match.get('embed_url'))}, acestreams={len(match.get('acestreams', []))}")
         except Exception as e:
-            logger.error(f"Ошибка поиска Ace Stream: {e}")
+            logger.error(f"Ошибка загрузки данных матча: {e}")
     
     web_app_url = get_web_app_url(match)
     
@@ -376,6 +386,7 @@ async def show_match(cb: types.CallbackQuery):
     text += "\n👇 <b>Способы просмотра:</b>"
     
     btns = [
+        [InlineKeyboardButton(text="📺 Смотреть трансляцию", web_app=WebAppInfo(url=web_app_url))],
         [InlineKeyboardButton(text="🌐 Открыть на LiveTV", url=match['url'])],
     ]
     
@@ -384,12 +395,8 @@ async def show_match(cb: types.CallbackQuery):
     if acestreams:
         text += format_acestream_sources(acestreams)
         text += "\n<i>↩️ Нажмите на ссылку чтобы скопировать</i>"
-        
-        # Добавляем кнопку Web App если есть acestreams
-        btns.insert(0, [InlineKeyboardButton(text="📺 Красивый плеер", web_app=WebAppInfo(url=web_app_url))])
     else:
-        text += "\n\n⚠️ <i>Ace Stream источники не найдены.</i>"
-        text += "\n💡 Откройте на LiveTV для просмотра"
+        text += "\n\n💡 <i>Откройте Web App для просмотра</i>"
     
     text += "\n\n💡 <i>Ace Player: acestream.org</i>"
     
