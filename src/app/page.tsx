@@ -44,7 +44,6 @@ export default function FutLiveApp() {
   const [currentSport, setCurrentSport] = useState(0)
   const [toast, setToast] = useState<{ message: string; type: string } | null>(null)
   const [showPlayer, setShowPlayer] = useState(false)
-  const [playerError, setPlayerError] = useState(false)
 
   const showToast = (message: string, type: string = '') => {
     setToast({ message, type })
@@ -75,12 +74,12 @@ export default function FutLiveApp() {
     })
   }, [])
 
-  // Get proxied player URL
-  const getProxiedPlayerUrl = useCallback((embedUrl: string) => {
-    if (!embedUrl) return ''
-    // Use our proxy to fetch the player
-    return `/api/player-proxy?url=${encodeURIComponent(embedUrl)}`
-  }, [])
+  // Open on LiveTV
+  const openLiveTV = useCallback(() => {
+    if (matchData.url) {
+      window.open(matchData.url, '_blank')
+    }
+  }, [matchData.url])
 
   // Initialize from URL params
   useEffect(() => {
@@ -107,98 +106,50 @@ export default function FutLiveApp() {
 
     setMatchData(data)
 
-    // Auto-show player if embed URL exists
-    if (data.embed) {
+    // Auto-show player if URL exists
+    if (data.url) {
       setShowPlayer(true)
     }
   }, [])
 
-  // Handle iframe error
-  const handlePlayerError = useCallback(() => {
-    setPlayerError(true)
-  }, [])
-
-  // Open on LiveTV
-  const openLiveTV = useCallback(() => {
-    if (matchData.url) {
-      window.open(matchData.url, '_blank')
-    }
-  }, [matchData.url])
-
-  // Fullscreen player view
-  if (showPlayer && matchData.embed) {
+  // Fullscreen player view with LiveTV match page
+  if (showPlayer && matchData.url) {
     return (
       <div style={{ minHeight: '100vh', background: '#0d0d1a', color: '#fff', fontFamily: 'system-ui, -apple-system, sans-serif' }}>
         {/* Player Header */}
-        <header style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px', background: 'rgba(0,0,0,0.9)', position: 'sticky', top: 0, zIndex: 100 }}>
-          <button onClick={() => setShowPlayer(false)} style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'rgba(255,255,255,0.1)', border: 'none', padding: '8px 14px', borderRadius: 8, color: '#fff', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>
+        <header style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px', background: 'rgba(0,0,0,0.95)', position: 'sticky', top: 0, zIndex: 100 }}>
+          <button onClick={() => setShowPlayer(false)} style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'rgba(255,255,255,0.15)', border: 'none', padding: '8px 14px', borderRadius: 8, color: '#fff', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>
             ← Назад
           </button>
-          <div style={{ fontSize: 13, fontWeight: 600, maxWidth: '50%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          <div style={{ fontSize: 12, fontWeight: 600, maxWidth: '50%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {matchData.title}
           </div>
           <div style={{ background: matchData.status.includes('LIVE') ? '#c0392b' : '#2980b9', padding: '4px 10px', borderRadius: 12, fontSize: 10, fontWeight: 600 }}>
-            {matchData.status.includes('LIVE') ? '🔴 LIVE' : `⏱️ ${matchData.time}`}
+            {matchData.status.includes('LIVE') ? '🔴 LIVE' : `⏱️`}
           </div>
         </header>
 
-        {/* Match Info */}
-        <div style={{ padding: '8px 14px', background: 'rgba(255,255,255,0.03)', textAlign: 'center' }}>
-          <div style={{ fontSize: 14, fontWeight: 600 }}>{matchData.title}</div>
-          {matchData.league && <div style={{ fontSize: 11, color: '#666', marginTop: 2 }}>🏆 {matchData.league}</div>}
+        {/* Match Info Bar */}
+        <div style={{ padding: '10px 14px', background: 'rgba(255,255,255,0.05)', borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
+          <div style={{ fontSize: 14, fontWeight: 700, textAlign: 'center' }}>{matchData.title}</div>
+          {matchData.league && <div style={{ fontSize: 11, color: '#888', textAlign: 'center', marginTop: 3 }}>🏆 {matchData.league}</div>}
         </div>
 
-        {/* Player Container */}
-        <div style={{ position: 'relative', width: '100%', background: '#000' }}>
-          <div style={{ position: 'relative', paddingTop: '56.25%' }}>
-            {!playerError ? (
-              <iframe
-                src={getProxiedPlayerUrl(matchData.embed)}
-                style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', border: 'none' }}
-                allowFullScreen
-                allow="autoplay; fullscreen; picture-in-picture"
-                onError={handlePlayerError}
-              />
-            ) : (
-              <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: '#1a1a2e', color: '#888', gap: 16, padding: 20, textAlign: 'center' }}>
-                <div style={{ fontSize: 48 }}>⚠️</div>
-                <div>Не удалось загрузить плеер</div>
-                <button onClick={openLiveTV} style={{ background: '#3498db', color: '#fff', padding: '12px 24px', borderRadius: 10, fontSize: 14, fontWeight: 600, border: 'none', cursor: 'pointer' }}>
-                  🌐 Открыть на LiveTV
-                </button>
-              </div>
-            )}
+        {/* Instructions */}
+        <div style={{ padding: '10px 14px', background: '#1a472a', borderBottom: '1px solid #2ecc71' }}>
+          <div style={{ fontSize: 12, color: '#2ecc71', textAlign: 'center', fontWeight: 600 }}>
+            👆 Нажмите на ссылку трансляции в таблице ниже
           </div>
         </div>
 
-        {/* Alternative buttons */}
-        <div style={{ padding: '12px 14px' }}>
-          <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
-            <button onClick={openLiveTV} style={{ flex: 1, background: 'rgba(52,152,219,0.2)', color: '#3498db', padding: '12px', borderRadius: 10, fontSize: 13, fontWeight: 600, border: '1px solid rgba(52,152,219,0.3)', cursor: 'pointer' }}>
-              🌐 LiveTV
-            </button>
-            <button onClick={() => { setPlayerError(false); setShowPlayer(false) }} style={{ flex: 1, background: 'rgba(255,255,255,0.1)', color: '#fff', padding: '12px', borderRadius: 10, fontSize: 13, fontWeight: 600, border: 'none', cursor: 'pointer' }}>
-              🔄 Перезагрузить
-            </button>
-          </div>
-
-          {/* Ace Stream Sources */}
-          {matchData.acestreams.length > 0 && (
-            <div>
-              <div style={{ fontSize: 11, color: '#888', marginBottom: 8 }}>🎬 Ace Stream ссылки:</div>
-              {matchData.acestreams.slice(0, 4).map((link, i) => {
-                const lang = LANGUAGES[i] || LANGUAGES[LANGUAGES.length - 1]
-                return (
-                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: 10, background: 'rgba(255,255,255,0.05)', borderRadius: 8, marginBottom: 4 }}>
-                    <span style={{ fontSize: 18 }}>{lang.flag}</span>
-                    <span style={{ flex: 1, fontSize: 12 }}>{lang.name}</span>
-                    <button onClick={() => copyLink(link)} style={{ background: 'rgba(255,255,255,0.1)', border: 'none', padding: '6px', borderRadius: 6, fontSize: 12, cursor: 'pointer' }}>📋</button>
-                    <button onClick={() => openAcePlayer(link)} style={{ background: '#e74c3c', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 6, fontSize: 11, fontWeight: 600, cursor: 'pointer' }}>🚀 Ace</button>
-                  </div>
-                )
-              })}
-            </div>
-          )}
+        {/* LiveTV Match Page iframe */}
+        <div style={{ position: 'relative', width: '100%', height: 'calc(100vh - 130px)' }}>
+          <iframe
+            src={matchData.url}
+            style={{ width: '100%', height: '100%', border: 'none' }}
+            allowFullScreen
+            allow="autoplay; fullscreen"
+          />
         </div>
 
         {/* Toast */}
@@ -247,12 +198,12 @@ export default function FutLiveApp() {
       {activeTab === 'player' && (
         <div style={{ padding: '16px' }}>
           {/* Watch Button */}
-          {(matchData.embed || matchData.url) && (
-            <div onClick={() => matchData.embed ? setShowPlayer(true) : openLiveTV()} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: 16, background: 'linear-gradient(135deg, rgba(46,204,113,0.2) 0%, rgba(39,174,96,0.15) 100%)', borderRadius: 14, marginBottom: 16, border: '2px solid #2ecc71', cursor: 'pointer' }}>
+          {matchData.url && (
+            <div onClick={() => setShowPlayer(true)} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: 16, background: 'linear-gradient(135deg, rgba(46,204,113,0.2) 0%, rgba(39,174,96,0.15) 100%)', borderRadius: 14, marginBottom: 16, border: '2px solid #2ecc71', cursor: 'pointer' }}>
               <div style={{ fontSize: 32 }}>📺</div>
               <div style={{ flex: 1 }}>
                 <div style={{ fontWeight: 700, fontSize: 16, color: '#2ecc71' }}>Смотреть трансляцию</div>
-                <div style={{ fontSize: 12, color: '#888', marginTop: 4 }}>Открыть плеер</div>
+                <div style={{ fontSize: 12, color: '#888', marginTop: 4 }}>Открыть страницу матча</div>
               </div>
               <div style={{ background: '#2ecc71', color: '#fff', padding: '12px 20px', borderRadius: 10, fontSize: 14, fontWeight: 700 }}>▶ Смотреть</div>
             </div>
@@ -261,12 +212,12 @@ export default function FutLiveApp() {
           {/* Open on LiveTV */}
           {matchData.url && (
             <div onClick={openLiveTV} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: 14, background: 'rgba(52,152,219,0.15)', borderRadius: 12, marginBottom: 16, border: '1px solid rgba(52,152,219,0.3)', cursor: 'pointer' }}>
-              <div style={{ fontSize: 24 }}>🌐</div>
+              <div style={{ fontSize: 26 }}>🌐</div>
               <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 600, fontSize: 14 }}>Открыть на LiveTV.sx</div>
-                <div style={{ fontSize: 11, color: '#888' }}>Смотреть на сайте</div>
+                <div style={{ fontWeight: 700, fontSize: 15 }}>Открыть на LiveTV.sx</div>
+                <div style={{ fontSize: 11, color: '#888', marginTop: 2 }}>В новой вкладке</div>
               </div>
-              <div style={{ color: '#3498db', fontSize: 18 }}>→</div>
+              <div style={{ color: '#3498db', fontSize: 22 }}>→</div>
             </div>
           )}
 
@@ -295,14 +246,17 @@ export default function FutLiveApp() {
           <div style={{ padding: 14, background: 'rgba(255,255,255,0.03)', borderRadius: 12, fontSize: 13, lineHeight: 1.7 }}>
             <div style={{ fontWeight: 600, marginBottom: 10, color: '#fff' }}>💡 Как смотреть:</div>
             <div style={{ color: '#888' }}>
-              <b style={{ color: '#2ecc71' }}>📺 Плеер:</b> Нажмите "Смотреть трансляцию"<br/><br/>
-              <b style={{ color: '#3498db' }}>🌐 LiveTV:</b> Откроет официальный сайт<br/><br/>
+              <b style={{ color: '#2ecc71' }}>📺 В плеере:</b><br/>
+              1. Нажмите "Смотреть трансляцию"<br/>
+              2. На странице выберите ссылку в таблице<br/>
+              3. Откроется плеер с трансляцией<br/><br/>
+
               <b style={{ color: '#e74c3c' }}>🚀 Ace Player (Android):</b><br/>
-              Нажмите 🚀 - откроется приложение
+              Нажмите 🚀 - откроется приложение Ace Player
             </div>
           </div>
 
-          {!matchData.embed && !matchData.url && matchData.acestreams.length === 0 && (
+          {!matchData.url && matchData.acestreams.length === 0 && (
             <div style={{ color: '#666', textAlign: 'center', padding: 40, fontSize: 14 }}>Источники не найдены</div>
           )}
         </div>
