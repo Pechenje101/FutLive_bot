@@ -1,5 +1,6 @@
 """
 Match Finder - оптимизированный парсер матчей с livetv.sx
+Поддержка Ace Stream, Web плееров и прямых ссылок
 """
 
 import asyncio
@@ -7,6 +8,7 @@ import logging
 import re
 import hashlib
 from typing import Dict, List, Optional
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +53,8 @@ class MatchFinder:
                     '--disable-dev-shm-usage',
                     '--disable-software-rasterizer',
                     '--disable-extensions',
-                    '--disable-images',  # Faster loading
-                    '--disable-css',     # Faster loading
+                    '--disable-images',
+                    '--disable-css',
                 ]
             )
             
@@ -199,9 +201,7 @@ class MatchFinder:
     
     def _clean_title(self, title: str) -> str:
         """Очистка названия матча"""
-        # Remove extra spaces
         title = ' '.join(title.split())
-        # Remove time prefix like "12:30 "
         title = re.sub(r'^\d{1,2}:\d{2}\s*', '', title)
         return title.strip()
     
@@ -229,12 +229,10 @@ class MatchFinder:
     
     def _extract_league(self, text: str) -> str:
         """Извлечение лиги"""
-        # Look for text in parentheses
         m = re.search(r'\(([^)]+)\)', text)
         if m:
             return m.group(1)[:30]
         
-        # Known leagues
         leagues = {
             'champions': 'ЛЧ', 'europa': 'ЛЕ', 'premier': 'EPL',
             'la liga': 'La Liga', 'serie a': 'Serie A', 
@@ -250,10 +248,12 @@ class MatchFinder:
         return ""
     
     async def get_match_data(self, match_url: str) -> Dict:
-        """Извлечение всех данных о матче: embed URL и Ace Stream ссылки"""
+        """Извлечение всех данных о матче: Ace Stream, Web плееры, прямые ссылки"""
         result = {
-            'embed_url': None,
-            'acestreams': []
+            'acestreams': [],
+            'web_players': [],
+            'video_url': None,
+            'hls_url': None,
         }
         
         try:
@@ -264,111 +264,164 @@ class MatchFinder:
             
             # Load match page
             await self.page.goto(match_url, wait_until="domcontentloaded", timeout=15000)
-            
-            # Wait for dynamic content
             await asyncio.sleep(2)
             
-            # Extract embed URL (iframe src)
-            try:
-                embed_url = await self.page.evaluate("""
-                () => {
-                    // Find iframe with player
-                    const iframes = document.querySelectorAll('iframe');
-                    for (const iframe of iframes) {
-                        const src = iframe.src || iframe.getAttribute('src') || '';
-                        if (src.includes('ltvplayer') || src.includes('cdn.livetv') || src.includes('livetv')) {
-                            return src;
+            # Extract all data via JavaScript
+            page_data = await self.page.evaluate("""
+            () => {
+                const result = {
+                    acestreams: [],
+                    webPlayers: [],
+                    videoUrl: null,
+                    hlsUrl: null
+                };
+                
+                const html = document.body.innerHTML;
+                
+                // 1. Ace Stream IDs
+                const aceMatches = html.matchAll(/acestream:\\/\\/([a-f0-9]{40})/gi);
+                for (const m of aceMatches) {
+                    result.acestreams.push('acestream://' + m[1]);
+                }
+                
+                // Also find 40-char hex strings that might be acestream IDs
+                if (result.acestreams.length === 0) {
+                    const hexMatches = html.matchAll(/["']([a-f0-9]{40})["']/gi);
+                    for (const m of hexMatches) {
+                        result.acestreams.push('acestream://' + m[1]);
+                    }
+                }
+                
+                // 2. Web player iframes (apl392.me, etc)
+                document.querySelectorAll('iframe').forEach(iframe => {
+                    const src = iframe.src || '';
+                    if (src.includes('apl') || src.includes('player') || src.includes('video.php')) {
+                        if (!src.includes('ads.') && !src.includes('banner')) {
+                            result.webPlayers.push(src);
                         }
                     }
-                    
-                    // Find links to player page
-                    const links = document.querySelectorAll('a[href*="ltvplayer"], a[href*="video"]');
-                    for (const link of links) {
-                        const href = link.href;
-                        if (href && (href.includes('ltvplayer') || href.includes('cache/ltv'))) {
-                            return href;
+                });
+                
+                // 3. Links to video players
+                document.querySelectorAll('a').forEach(link => {
+                    const href = link.href || '';
+                    if (href.includes('showvideo') || href.includes('video.php') || href.includes('player')) {
+                        if (!href.includes('ads.')) {
+                            result.webPlayers.push(href);
                         }
                     }
-                    
-                    return null;
-                }
-                """)
+                });
                 
-                if embed_url:
-                    # Make sure URL is absolute
-                    if embed_url.startswith('//'):
-                        embed_url = 'https:' + embed_url
-                    elif not embed_url.startswith('http'):
-                        embed_url = 'https://cdn.livetv873.me' + embed_url if embed_url.startswith('/') else 'https://' + embed_url
-                    
-                    result['embed_url'] = embed_url
-                    logger.info(f"✅ Найден embed URL: {embed_url}")
-            except Exception as e:
-                logger.warning(f"Не удалось найти embed URL: {e}")
-            
-            # Try to click on video links to load player
-            try:
-                await self.page.click('a[href*="ltvplayer"], a[href*="video"]').catch(lambda: None)
-                await asyncio.sleep(2)
-            except:
-                pass
-            
-            # Extract page content
-            content = await self.page.content()
-            
-            # Multiple patterns for acestream IDs
-            patterns = [
-                r'acestream://([a-f0-9]{40})',
-                r'"id"\s*:\s*"([a-f0-9]{40})"',
-                r'"contentid"\s*:\s*"([a-f0-9]{40})"',
-                r'data-id=["\']([a-f0-9]{40})["\']',
-                r'([a-f0-9]{40})',
-            ]
-            
-            found_ids = set()
-            
-            for pattern in patterns:
-                matches = re.findall(pattern, content, re.IGNORECASE)
-                for m in matches:
-                    if len(m) == 40 and re.match(r'^[a-f0-9]+$', m, re.IGNORECASE):
-                        found_ids.add(m.lower())
-            
-            # Also try JavaScript extraction
-            try:
-                js_ids = await self.page.evaluate("""
-                () => {
-                    const ids = [];
-                    const html = document.body.innerHTML;
-                    
-                    // Find all 40-char hex strings
-                    const matches = html.match(/[a-f0-9]{40}/gi) || [];
-                    matches.forEach(m => ids.push(m.toLowerCase()));
-                    
-                    // Check data attributes
-                    document.querySelectorAll('[data-id], [data-contentid], [data-acestream]').forEach(el => {
-                        const id = el.dataset.id || el.dataset.contentid || el.dataset.acestream;
-                        if (id && id.length === 40) ids.push(id.toLowerCase());
-                    });
-                    
-                    return [...new Set(ids)];
+                // 4. m3u8 URLs in scripts
+                const m3u8Match = html.match(/["'](https?:\\/\\/[^"']*\\.m3u8[^"']*)["']/i);
+                if (m3u8Match) {
+                    result.hlsUrl = m3u8Match[1].replace(/\\\\/g, '');
                 }
-                """)
                 
-                if js_ids:
-                    found_ids.update(js_ids)
-            except:
-                pass
+                // 5. mp4 URLs
+                const mp4Match = html.match(/["'](https?:\\/\\/[^"']*\\.mp4[^"']*)["']/i);
+                if (mp4Match) {
+                    result.videoUrl = mp4Match[1].replace(/\\\\/g, '');
+                }
+                
+                return result;
+            }
+            """)
             
-            # Convert to acestream URLs
-            for ace_id in found_ids:
-                result['acestreams'].append(f"acestream://{ace_id}")
+            result['acestreams'] = list(set(page_data.get('acestreams', [])))
+            result['web_players'] = list(set(page_data.get('webPlayers', [])))
+            result['video_url'] = page_data.get('videoUrl')
+            result['hls_url'] = page_data.get('hlsUrl')
             
-            logger.info(f"✅ Найдено: embed_url={result['embed_url']}, acestreams={len(result['acestreams'])}")
+            # If we have web player links, try to extract direct video URL
+            if result['web_players'] and not result['video_url']:
+                for player_url in result['web_players'][:2]:  # Try first 2
+                    video_url = await self._extract_video_from_player(player_url)
+                    if video_url:
+                        result['video_url'] = video_url
+                        break
+            
+            logger.info(f"✅ Найдено: acestreams={len(result['acestreams'])}, web_players={len(result['web_players'])}, video_url={result['video_url'] is not None}")
             
         except Exception as e:
             logger.error(f"❌ Ошибка получения данных матча: {e}")
         
         return result
+    
+    async def _extract_video_from_player(self, player_url: str) -> Optional[str]:
+        """Извлечение прямой ссылки на видео из плеера"""
+        try:
+            logger.info(f"🎬 Извлечение видео из плеера: {player_url}")
+            
+            # Make URL absolute
+            if player_url.startswith('//'):
+                player_url = 'https:' + player_url
+            elif not player_url.startswith('http'):
+                player_url = 'https://' + player_url
+            
+            # Open in new page to avoid affecting main page
+            player_page = await self.context.new_page()
+            
+            try:
+                await player_page.goto(player_url, wait_until="domcontentloaded", timeout=10000)
+                await asyncio.sleep(2)
+                
+                # Extract video URL
+                video_data = await player_page.evaluate("""
+                () => {
+                    const result = {};
+                    
+                    // Video element
+                    const video = document.querySelector('video');
+                    if (video) {
+                        result.video_src = video.src;
+                        result.video_currentSrc = video.currentSrc;
+                    }
+                    
+                    // Source elements
+                    const sources = document.querySelectorAll('source');
+                    sources.forEach(s => {
+                        if (s.src && (s.src.includes('.mp4') || s.src.includes('.m3u8'))) {
+                            result.source = s.src;
+                        }
+                    });
+                    
+                    // Scripts
+                    const html = document.body.innerHTML;
+                    
+                    // mp4
+                    const mp4Match = html.match(/["'](https?:\\/\\/[^"']*\\.mp4[^"']*)["']/i);
+                    if (mp4Match) result.mp4 = mp4Match[1].replace(/\\\\/g, '');
+                    
+                    // m3u8
+                    const m3u8Match = html.match(/["'](https?:\\/\\/[^"']*\\.m3u8[^"']*)["']/i);
+                    if (m3u8Match) result.m3u8 = m3u8Match[1].replace(/\\\\/g, '');
+                    
+                    // file: "..." pattern
+                    const fileMatch = html.match(/file\\s*:\\s*["']([^"']+)["']/i);
+                    if (fileMatch) result.file = fileMatch[1];
+                    
+                    return result;
+                }
+                """)
+                
+                # Return first found video URL
+                for key in ['video_currentSrc', 'video_src', 'source', 'mp4', 'm3u8', 'file']:
+                    url = video_data.get(key)
+                    if url and ('.mp4' in url or '.m3u8' in url):
+                        # Clean URL
+                        if url.startswith('//'):
+                            url = 'https:' + url
+                        logger.info(f"✅ Найдена ссылка на видео: {url[:80]}...")
+                        return url
+                
+            finally:
+                await player_page.close()
+                
+        except Exception as e:
+            logger.warning(f"Не удалось извлечь видео из плеера: {e}")
+        
+        return None
 
     async def get_match_acestreams(self, match_url: str) -> List[str]:
         """Извлечение только Ace Stream ссылок (для обратной совместимости)"""

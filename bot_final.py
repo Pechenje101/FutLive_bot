@@ -95,6 +95,18 @@ def get_web_app_url(match: dict, auto_play: bool = False) -> str:
     if match.get('acestreams'):
         params['acestreams'] = urllib.parse.quote(json.dumps(match['acestreams']))
     
+    # Web players as JSON
+    if match.get('web_players'):
+        params['web_players'] = urllib.parse.quote(json.dumps(match['web_players']))
+    
+    # Direct video URL
+    if match.get('video_url'):
+        params['video_url'] = match['video_url']
+    
+    # HLS URL
+    if match.get('hls_url'):
+        params['hls_url'] = match['hls_url']
+    
     return WEB_APP_URL + '?' + urllib.parse.urlencode(params)
 
 
@@ -345,22 +357,30 @@ async def show_match(cb: types.CallbackQuery):
         await cb.answer("Матч не найден", show_alert=True)
         return
     
-    # Загружаем acestreams если ещё не загружены
-    if not match.get('acestreams'):
+    # Загружаем данные матча если ещё не загружены
+    if not match.get('acestreams') and not match.get('video_url'):
         await cb.answer("⏳ Загрузка источников...", show_alert=False)
         
         try:
             match_data = await finder.get_match_data(match['url'])
-            if match_data and match_data.get('acestreams'):
-                match['acestreams'] = match_data['acestreams']
+            if match_data:
+                # Update match with all data
+                if match_data.get('acestreams'):
+                    match['acestreams'] = match_data['acestreams']
+                if match_data.get('web_players'):
+                    match['web_players'] = match_data['web_players']
+                if match_data.get('video_url'):
+                    match['video_url'] = match_data['video_url']
+                if match_data.get('hls_url'):
+                    match['hls_url'] = match_data['hls_url']
                 
                 # Обновляем в кэше
                 for m in cache["matches"]:
                     if m["id"] == mid:
-                        m['acestreams'] = match_data['acestreams']
+                        m.update(match)
                         break
                 
-                logger.info(f"✅ Ace Streams для {match['title'][:30]}: {len(match['acestreams'])}")
+                logger.info(f"✅ Данные для {match['title'][:30]}: ace={len(match.get('acestreams', []))}, web={len(match.get('web_players', []))}, video={match.get('video_url') is not None}")
         except Exception as e:
             logger.error(f"Ошибка загрузки данных матча: {e}")
     
@@ -371,6 +391,10 @@ async def show_match(cb: types.CallbackQuery):
     
     if match.get('league'):
         text += f"🏆 {match['league']}\n"
+    
+    # Если есть прямая ссылка на видео
+    if match.get('video_url'):
+        text += "\n✅ <b>Доступна трансляция во встроенном плеере!</b>\n"
     
     btns = [
         [InlineKeyboardButton(text="📺 Смотреть в Mini App", web_app=WebAppInfo(url=web_app_url))],
