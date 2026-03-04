@@ -7,6 +7,7 @@ import logging
 import re
 import hashlib
 from typing import Dict, List, Optional
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -134,8 +135,9 @@ class MatchFinder:
     async def get_match_data(self, match_url: str) -> Dict:
         """Извлечение embed iframe URL из матча"""
         result = {
-            'embed_url': None,  # URL для iframe
-            'acestreams': []
+            'embed_url': None,
+            'acestreams': [],
+            'hls_url': None
         }
         
         try:
@@ -145,33 +147,89 @@ class MatchFinder:
             await self.page.goto(match_url, wait_until="domcontentloaded", timeout=15000)
             await asyncio.sleep(2)
             
-            # Извлекаем embed URL и Ace Stream
+            # Извлекаем ВСЕ возможные URL для плеера
             data = await self.page.evaluate("""
             () => {
-                const result = { embed_url: null, acestreams: [] };
+                const result = { 
+                    embed_url: null, 
+                    acestreams: [],
+                    webplayer_url: null,
+                    iframe_src: null,
+                    onclick_url: null,
+                    direct_embed: null,
+                    player_id: null
+                };
                 
-                // 1. Ищем webplayer.php?t=ifr в HTML
                 const html = document.body.innerHTML;
                 
-                // Паттерн для embed iframe
-                const embedMatch = html.match(/["'](\\/\\/cdn\\.livetv[^"']*webplayer\\.php\\?t=ifr[^"']*)["']/i);
-                if (embedMatch) {
-                    result.embed_url = embedMatch[1].replace(/&amp;/g, '&');
+                // 1. Ищем webplayer.php?t=ifr в разных форматах
+                // Формат 1: в атрибуте src или data-src
+                const iframes = document.querySelectorAll('iframe');
+                for (const iframe of iframes) {
+                    const src = iframe.src || iframe.getAttribute('data-src') || '';
+                    if (src.includes('webplayer.php') || src.includes('apl393') || src.includes('embed')) {
+                        result.iframe_src = src;
+                        break;
+                    }
                 }
                 
-                // 2. Ищем ссылку на webplayer
-                if (!result.embed_url) {
-                    const links = document.querySelectorAll('a');
-                    for (const link of links) {
-                        const href = link.href || '';
-                        if (href.includes('webplayer.php') && href.includes('t=ifr')) {
-                            result.embed_url = href;
-                            break;
+                // Формат 2: в onclick или других атрибутах ссылок
+                const links = document.querySelectorAll('a');
+                for (const link of links) {
+                    const onclick = link.getAttribute('onclick') || '';
+                    const href = link.href || '';
+                    
+                    // Ищем webplayer в onclick
+                    if (onclick.includes('webplayer.php') || onclick.includes('t=ifr')) {
+                        const match = onclick.match(/['"]([^'"]*(?:webplayer\\.php|t=ifr)[^'"]*)['"]/);
+                        if (match) {
+                            result.onclick_url = match[1].replace(/\\\\/g, '');
+                        }
+                    }
+                    
+                    // Ищем webplayer в href
+                    if (href.includes('webplayer.php') && href.includes('t=ifr')) {
+                        result.webplayer_url = href;
+                    }
+                }
+                
+                // Формат 3: прямой поиск в HTML
+                const patterns = [
+                    /["']([^"']*webplayer\\.php\\?t=ifr[^"']*)["']/gi,
+                    /["']([^"']*cdn\\.livetv[^"']*)["']/gi,
+                    /["']([^"']*emb\\.apl393[^"']*)["']/gi,
+                    /src=["']([^"']*player[^"']*)["']/gi
+                ];
+                
+                for (const pattern of patterns) {
+                    const matches = html.match(pattern);
+                    if (matches && matches.length > 0) {
+                        const url = matches[0].replace(/src=["']/, '').replace(/["']$/, '').replace(/&amp;/g, '&');
+                        if (url && !result.direct_embed) {
+                            result.direct_embed = url;
                         }
                     }
                 }
                 
-                // 3. Ace Stream
+                // 4. Ищем player ID
+                const idMatch = html.match(/player[_-]?id["':=\\s]+["']?([a-zA-Z0-9]+)["']?/i);
+                if (idMatch) {
+                    result.player_id = idMatch[1];
+                }
+                
+                // 5. Ищем event ID для прямого конструирования URL
+                const eventMatch = html.match(/event[_-]?id["':=\\s]+["']?(\\d+)["']?/i);
+                if (eventMatch) {
+                    result.event_id = eventMatch[1];
+                }
+                
+                // 6. Ищем ID в URL webplayer
+                const webplayerIdMatch = html.match(/webplayer\\.php\\?[^"']*c=([^"&']+)/i);
+                if (webplayerIdMatch) {
+                    result.webplayer_c = webplayerIdMatch[1];
+                }
+                
+                // Ace Stream
                 const aceMatches = html.match(/acestream:\\/\\/([a-f0-9]{40})/gi);
                 if (aceMatches) {
                     result.acestreams = aceMatches;
@@ -181,21 +239,59 @@ class MatchFinder:
             }
             """)
             
-            embed_url = data.get('embed_url')
+            logger.info(f"📊 Найденные данные: {json.dumps({k: v for k, v in data.items() if v}, indent=2)}")
             
+            # Приоритет embed URL
+            embed_url = None
+            
+            # Приоритет 1: iframe src
+            if data.get('iframe_src'):
+                embed_url = data['iframe_src']
+                logger.info(f"✅ Найден iframe src: {embed_url[:60]}...")
+            
+            # Приоритет 2: onclick URL
+            if not embed_url and data.get('onclick_url'):
+                embed_url = data['onclick_url']
+                logger.info(f"✅ Найден onclick URL: {embed_url[:60]}...")
+            
+            # Приоритет 3: webplayer URL из ссылки
+            if not embed_url and data.get('webplayer_url'):
+                embed_url = data['webplayer_url']
+                logger.info(f"✅ Найден webplayer URL: {embed_url[:60]}...")
+            
+            # Приоритет 4: прямой embed из HTML
+            if not embed_url and data.get('direct_embed'):
+                embed_url = data['direct_embed']
+                logger.info(f"✅ Найден direct embed: {embed_url[:60]}...")
+            
+            # Делаем URL абсолютным
             if embed_url:
-                # Делаем URL абсолютным
                 if embed_url.startswith('//'):
                     embed_url = 'https:' + embed_url
+                elif embed_url.startswith('/'):
+                    embed_url = 'https://livetv.sx' + embed_url
+                elif not embed_url.startswith('http'):
+                    embed_url = 'https://' + embed_url
+                
                 result['embed_url'] = embed_url
-                logger.info(f"✅ Embed URL: {embed_url[:60]}...")
+                logger.info(f"✅ Итоговый embed URL: {embed_url}")
             else:
-                logger.warning("❌ Embed URL не найден")
+                logger.warning("❌ Embed URL не найден, пробуем конструировать...")
+                
+                # Если есть webplayer_c, конструируем URL
+                if data.get('webplayer_c'):
+                    result['embed_url'] = f"https://cdn.livetvcdn.net/webplayer.php?t=ifr&c={data['webplayer_c']}"
+                    logger.info(f"🔧 Сконструирован URL: {result['embed_url']}")
             
             result['acestreams'] = data.get('acestreams', [])
-            logger.info(f"✅ AceStreams: {len(result['acestreams'])}")
+            
+            # Если Ace Streams найдены, логируем
+            if result['acestreams']:
+                logger.info(f"✅ AceStreams: {len(result['acestreams'])}")
             
         except Exception as e:
             logger.error(f"❌ Ошибка: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
         
         return result
