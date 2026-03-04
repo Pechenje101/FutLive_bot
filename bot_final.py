@@ -91,9 +91,9 @@ def get_web_app_url(match: dict, auto_play: bool = False) -> str:
         'url': match['url'],
     }
     
-    # HLS URL - прямая ссылка на видеопоток
-    if match.get('hls_url'):
-        params['hls_url'] = match['hls_url']
+    # Embed URL - прямая ссылка на iframe плеер
+    if match.get('embed_url'):
+        params['embed_url'] = match['embed_url']
     
     # Ace streams as JSON
     if match.get('acestreams'):
@@ -350,14 +350,14 @@ async def show_match(cb: types.CallbackQuery):
         return
     
     # Загружаем данные матча если ещё не загружены
-    if not match.get('hls_url') and not match.get('acestreams'):
-        await cb.answer("⏳ Загрузка источников...", show_alert=False)
+    if not match.get('embed_url') and not match.get('acestreams'):
+        await cb.answer("⏳ Загрузка плеера...", show_alert=False)
         
         try:
             match_data = await finder.get_match_data(match['url'])
             if match_data:
-                if match_data.get('hls_url'):
-                    match['hls_url'] = match_data['hls_url']
+                if match_data.get('embed_url'):
+                    match['embed_url'] = match_data['embed_url']
                 if match_data.get('acestreams'):
                     match['acestreams'] = match_data['acestreams']
                 
@@ -366,9 +366,9 @@ async def show_match(cb: types.CallbackQuery):
                         m.update(match)
                         break
                 
-                logger.info(f"✅ Данные для {match['title'][:30]}: hls={match.get('hls_url') is not None}, ace={len(match.get('acestreams', []))}")
+                logger.info(f"✅ {match['title'][:30]}: embed={match.get('embed_url') is not None}, ace={len(match.get('acestreams', []))}")
         except Exception as e:
-            logger.error(f"Ошибка загрузки данных матча: {e}")
+            logger.error(f"Ошибка загрузки: {e}")
     
     web_app_url = get_web_app_url(match)
     
@@ -378,22 +378,19 @@ async def show_match(cb: types.CallbackQuery):
     if match.get('league'):
         text += f"🏆 {match['league']}\n"
     
-    if match.get('hls_url'):
-        text += "\n✅ <b>Трансляция готова к просмотру!</b>\n"
+    if match.get('embed_url'):
+        text += "\n✅ <b>Плеер готов!</b>\n"
     
     btns = [
-        [InlineKeyboardButton(text="📺 Смотреть в Mini App", web_app=WebAppInfo(url=web_app_url))],
-        [InlineKeyboardButton(text="🌐 Открыть на LiveTV", url=match['url'])],
+        [InlineKeyboardButton(text="📺 Смотреть", web_app=WebAppInfo(url=web_app_url))],
+        [InlineKeyboardButton(text="🌐 LiveTV", url=match['url'])],
     ]
     
     acestreams = match.get('acestreams', [])
     if acestreams:
         text += format_acestream_sources(acestreams)
-        text += "\n<i>↩️ Нажмите на ссылку чтобы скопировать</i>"
     
-    text += "\n\n💡 <i>Откройте Mini App для просмотра трансляции</i>"
-    
-    btns.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back")])
+    btns.append([InlineKeyboardButton(text="⬅️", callback_data="back")])
     
     await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), parse_mode="HTML", disable_web_page_preview=True)
 
