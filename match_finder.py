@@ -1,6 +1,6 @@
 """
 Match Finder - оптимизированный парсер матчей с livetv.sx
-Поддержка Ace Stream, Web плееров и прямых ссылок
+Извлекает прямые HLS ссылки для воспроизведения в плеере
 """
 
 import asyncio
@@ -32,7 +32,6 @@ class MatchFinder:
         self.context = None
         self.page = None
         self._initialized = False
-        self._last_request_time = 0
     
     async def _init_browser(self):
         """Быстрая инициализация браузера"""
@@ -64,7 +63,6 @@ class MatchFinder:
             )
             self.page = await self.context.new_page()
             
-            # Block unnecessary resources
             await self.page.route('**/*.{png,jpg,jpeg,gif,svg,css,woff,woff2}', lambda route: route.abort())
             
             self._initialized = True
@@ -235,11 +233,11 @@ class MatchFinder:
         return ""
     
     async def get_match_data(self, match_url: str) -> Dict:
-        """Извлечение всех данных о матче: embed плеер, Ace Stream, Web плееры"""
+        """Извлечение всех данных о матче: HLS ссылка, Ace Stream"""
         result = {
-            'embed_url': None,  # Прямая ссылка на embed плеер для iframe
+            'hls_url': None,  # Прямая ссылка на HLS поток для плеера
+            'embed_url': None,
             'acestreams': [],
-            'web_players': [],
         }
         
         try:
@@ -251,104 +249,106 @@ class MatchFinder:
             await self.page.goto(match_url, wait_until="domcontentloaded", timeout=15000)
             await asyncio.sleep(2)
             
-            # Извлекаем все данные
-            page_data = await self.page.evaluate("""
+            # Извлекаем webplayer URL
+            webplayer_urls = await self.page.evaluate("""
             () => {
-                const result = {
-                    webplayerUrls: [],
-                    acestreams: []
-                };
+                const urls = [];
                 
-                // 1. Ищем все onclick с show_webplayer - это ссылки на плееры
+                // Ищем onclick с show_webplayer
                 document.querySelectorAll('[onclick]').forEach(el => {
                     const onclick = el.getAttribute('onclick') || '';
                     const href = el.href || '';
                     
-                    if (onclick.includes('show_webplayer')) {
-                        // URL из href или из onclick
-                        if (href && href.includes('webplayer')) {
-                            result.webplayerUrls.push(href);
-                        }
+                    if (onclick.includes('show_webplayer') && href && href.includes('webplayer')) {
+                        urls.push(href);
                     }
                 });
                 
-                // 2. Ищем ссылки на webplayer2.php напрямую
+                // Ищем ссылки на webplayer
                 document.querySelectorAll('a[href*="webplayer"]').forEach(link => {
-                    const href = link.href;
-                    if (href && href.includes('webplayer') && !href.includes('ads')) {
-                        result.webplayerUrls.push(href);
+                    if (link.href && !link.href.includes('ads')) {
+                        urls.push(link.href);
                     }
                 });
                 
-                // 3. Ищем iframe с плеером
-                document.querySelectorAll('iframe').forEach(iframe => {
-                    const src = iframe.src || '';
-                    if (src.includes('emb.apl') || src.includes('player/live') || src.includes('player/video')) {
-                        result.webplayerUrls.push(src);
-                    }
-                });
-                
-                // 4. Ace Stream
-                const html = document.body.innerHTML;
-                const aceMatches = html.matchAll(/acestream:\\/\\/([a-f0-9]{40})/gi);
-                for (const m of aceMatches) {
-                    result.acestreams.push('acestream://' + m[1]);
-                }
-                
-                if (result.acestreams.length === 0) {
-                    const hexMatches = html.matchAll(/["']([a-f0-9]{40})["']/gi);
-                    for (const m of hexMatches) {
-                        result.acestreams.push('acestream://' + m[1]);
-                    }
-                }
-                
-                return result;
+                return [...new Set(urls)];
             }
             """)
             
-            webplayer_urls = list(set(page_data.get('webplayerUrls', [])))
-            result['acestreams'] = list(set(page_data.get('acestreams', [])))
+            # Ace Stream
+            acestreams = await self.page.evaluate("""
+            () => {
+                const ids = [];
+                const html = document.body.innerHTML;
+                const matches = html.matchAll(/acestream:\\/\\/([a-f0-9]{40})/gi);
+                for (const m of matches) {
+                    ids.push('acestream://' + m[1]);
+                }
+                if (ids.length === 0) {
+                    const hexMatches = html.matchAll(/["']([a-f0-9]{40})["']/gi);
+                    for (const m of hexMatches) {
+                        ids.push('acestream://' + m[1]);
+                    }
+                }
+                return ids;
+            }
+            """)
             
-            logger.info(f"📊 Найдено webplayer URL: {len(webplayer_urls)}")
+            result['acestreams'] = list(set(acestreams))
             
-            # Если есть webplayer URL - загружаем и извлекаем embed
+            logger.info(f"📊 Найдено webplayer URLs: {len(webplayer_urls)}")
+            
+            # Если есть webplayer - загружаем и извлекаем HLS
             if webplayer_urls:
-                for wp_url in webplayer_urls[:3]:  # Пробуем первые 3
-                    embed_url = await self._extract_embed_from_webplayer(wp_url)
-                    if embed_url:
-                        result['embed_url'] = embed_url
-                        result['web_players'].append(embed_url)
-                        logger.info(f"✅ Найден embed URL: {embed_url}")
-                        break  # Берём первый рабочий
+                hls_url = await self._extract_hls_from_webplayer(webplayer_urls[0])
+                if hls_url:
+                    result['hls_url'] = hls_url
+                    logger.info(f"✅ Найден HLS URL: {hls_url[:60]}...")
             
-            logger.info(f"✅ Результат: embed={result['embed_url'] is not None}, acestreams={len(result['acestreams'])}")
+            logger.info(f"✅ Результат: hls={result['hls_url'] is not None}, acestreams={len(result['acestreams'])}")
             
         except Exception as e:
             logger.error(f"❌ Ошибка получения данных матча: {e}")
         
         return result
     
-    async def _extract_embed_from_webplayer(self, webplayer_url: str) -> Optional[str]:
-        """Извлечение embed URL из webplayer страницы"""
+    async def _extract_hls_from_webplayer(self, webplayer_url: str) -> Optional[str]:
+        """Извлечение HLS URL из webplayer через network перехват"""
         try:
-            logger.info(f"🎬 Загрузка webplayer: {webplayer_url[:60]}...")
+            logger.info(f"🎬 Загрузка webplayer для извлечения HLS...")
             
-            # Make URL absolute
             if webplayer_url.startswith('//'):
                 webplayer_url = 'https:' + webplayer_url
             elif not webplayer_url.startswith('http'):
                 webplayer_url = 'https://' + webplayer_url
             
+            # Создаём новую страницу для перехвата network
             player_page = await self.context.new_page()
             
+            # Список для перехваченных HLS URL
+            hls_urls = []
+            
+            async def handle_response(response):
+                url = response.url
+                # Ищем m3u8 файлы
+                if '.m3u8' in url and 'ad' not in url.lower():
+                    hls_urls.append(url)
+                    logger.info(f"  🎥 Найден HLS: {url[:60]}...")
+            
+            player_page.on('response', handle_response)
+            
             try:
-                await player_page.goto(webplayer_url, wait_until="domcontentloaded", timeout=10000)
-                await asyncio.sleep(2)
+                # Загружаем webplayer
+                await player_page.goto(webplayer_url, wait_until="networkidle", timeout=20000)
+                await asyncio.sleep(3)
                 
-                # Ищем iframe с embed плеером
+                # Если нашли HLS - возвращаем первый
+                if hls_urls:
+                    return hls_urls[0]
+                
+                # Если не нашли - пробуем найти embed iframe и загрузить его
                 embed_url = await player_page.evaluate("""
                 () => {
-                    // Ищем iframe с emb.apl
                     const iframes = document.querySelectorAll('iframe');
                     for (const iframe of iframes) {
                         const src = iframe.src || '';
@@ -361,18 +361,22 @@ class MatchFinder:
                 """)
                 
                 if embed_url:
-                    logger.info(f"✅ Embed: {embed_url}")
-                    return embed_url
+                    logger.info(f"  📺 Загрузка embed: {embed_url[:50]}...")
+                    await player_page.goto(embed_url, wait_until="networkidle", timeout=20000)
+                    await asyncio.sleep(5)
+                    
+                    if hls_urls:
+                        return hls_urls[0]
                 
             finally:
                 await player_page.close()
                 
         except Exception as e:
-            logger.warning(f"Ошибка webplayer: {e}")
+            logger.warning(f"Ошибка извлечения HLS: {e}")
         
         return None
 
     async def get_match_acestreams(self, match_url: str) -> List[str]:
-        """Извлечение только Ace Stream ссылок (для обратной совместимости)"""
+        """Извлечение только Ace Stream ссылок"""
         data = await self.get_match_data(match_url)
         return data.get('acestreams', [])
