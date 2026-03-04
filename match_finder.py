@@ -148,23 +148,23 @@ class MatchFinder:
             () => {
                 const result = { webplayers: [], acestreams: [] };
                 
-                // Все ссылки с webplayer
-                document.querySelectorAll('a').forEach(a => {
+                // 1. Ссылки с webplayer.php (основной источник)
+                document.querySelectorAll('a[href*="webplayer.php"]').forEach(a => {
                     const href = a.href || '';
-                    if (href.includes('webplayer') || href.includes('cdn.livetv')) {
-                        if (!href.includes('ads')) {
-                            result.webplayers.push(href);
-                        }
+                    if (href.includes('t=ifr') || href.includes('webplayer.php?t')) {
+                        result.webplayers.push(href);
                     }
                 });
                 
-                // Также ищем в onclick
-                document.querySelectorAll('[onclick]').forEach(el => {
-                    const onclick = el.getAttribute('onclick') || '';
-                    if (onclick.includes('webplayer')) {
-                        const match = onclick.match(/['"]([^'"]*(?:webplayer|cdn.livetv)[^'"]*)['"]/);
-                        if (match) result.webplayers.push(match[1]);
-                    }
+                // 2. Ссылки с webplayer2.php
+                document.querySelectorAll('a[href*="webplayer2.php"]').forEach(a => {
+                    result.webplayers.push(a.href);
+                });
+                
+                // 3. onclick с show_webplayer
+                document.querySelectorAll('[onclick*="show_webplayer"]').forEach(el => {
+                    const href = el.href || '';
+                    if (href) result.webplayers.push(href);
                 });
                 
                 // Ace Stream
@@ -179,15 +179,17 @@ class MatchFinder:
             webplayers = list(set(data.get('webplayers', [])))
             result['acestreams'] = data.get('acestreams', [])
             
-            logger.info(f"📊 Webplayers: {len(webplayers)}")
+            logger.info(f"📊 Webplayers: {len(webplayers)}, Ace: {len(result['acestreams'])}")
             
             # Извлекаем HLS из webplayer
             if webplayers:
-                for wp_url in webplayers[:2]:
-                    hls = await self._extract_hls(wp_url)
-                    if hls:
-                        result['hls_url'] = hls
-                        break
+                # Приоритет webplayer.php?t=ifr
+                iframe_player = next((w for w in webplayers if 'webplayer.php' in w and 't=ifr' in w), None)
+                wp_url = iframe_player or webplayers[0]
+                
+                hls = await self._extract_hls(wp_url)
+                if hls:
+                    result['hls_url'] = hls
             
         except Exception as e:
             logger.error(f"❌ Ошибка: {e}")
@@ -197,49 +199,35 @@ class MatchFinder:
     async def _extract_hls(self, webplayer_url: str) -> Optional[str]:
         """Извлечение HLS из webplayer"""
         try:
-            logger.info(f"🎬 Webplayer: {webplayer_url[:50]}...")
-            
-            if webplayer_url.startswith('//'):
-                webplayer_url = 'https:' + webplayer_url
+            logger.info(f"🎬 Webplayer: {webplayer_url[:60]}...")
             
             hls_urls = []
-            
             page = await self.context.new_page()
             
             async def handle_response(response):
                 url = response.url
+                # Ищем m3u8 файлы (HLS потоки)
                 if '.m3u8' in url and 'ad' not in url.lower():
-                    hls_urls.append(url)
+                    # Приоритет для 720p и 1080p
+                    if '720p' in url or '1080p' in url:
+                        hls_urls.insert(0, url)
+                    else:
+                        hls_urls.append(url)
                     logger.info(f"  ✅ HLS: {url[:60]}...")
             
             page.on('response', handle_response)
             
-            await page.goto(webplayer_url, wait_until="networkidle", timeout=20000)
-            await asyncio.sleep(3)
-            
-            # Ищем embed iframe
-            if not hls_urls:
-                embed = await page.evaluate("""
-                () => {
-                    const f = document.querySelectorAll('iframe');
-                    for (const i of f) {
-                        const src = i.src || '';
-                        if (src.includes('emb.apl') || src.includes('player/')) {
-                            return src;
-                        }
-                    }
-                    return null;
-                }
-                """)
-                
-                if embed:
-                    logger.info(f"  📺 Embed: {embed[:50]}...")
-                    await page.goto(embed, wait_until="networkidle", timeout=20000)
-                    await asyncio.sleep(5)
+            try:
+                await page.goto(webplayer_url, wait_until="load", timeout=20000)
+                await asyncio.sleep(4)  # Ждём загрузки видео
+            except Exception as e:
+                logger.warning(f"Таймаут загрузки (игнорируем): {e}")
+                await asyncio.sleep(2)
             
             await page.close()
             
             if hls_urls:
+                logger.info(f"✅ Найдено HLS: {len(hls_urls)}, выбираем лучший")
                 return hls_urls[0]
                 
         except Exception as e:
